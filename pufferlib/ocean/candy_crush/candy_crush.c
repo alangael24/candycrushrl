@@ -10,6 +10,9 @@ int main() {
         .frosting_layers = 2,
         .ingredient_target = 2,
         .ingredient_spawn_rows = 2,
+        .target_color = 3,
+        .color_target = 30,
+        .frosting_target = 30,
         .reward_per_tile = 0.05f,
         .combo_bonus = 0.10f,
         .invalid_penalty = -0.20f,
@@ -29,7 +32,7 @@ int main() {
         .curriculum_replay_prob = 0.15f,
     };
 
-    const int obs_size = env.board_size * env.board_size * (env.num_candies * 5 + 6) + env.board_size * env.board_size * 4;
+    const int obs_size = env.board_size * env.board_size * (env.num_candies * 5 + 8) + env.board_size * env.board_size * 4;
     env.observations = (unsigned char*)calloc(obs_size, sizeof(unsigned char));
     env.actions = (int*)calloc(1, sizeof(int));
     env.rewards = (float*)calloc(1, sizeof(float));

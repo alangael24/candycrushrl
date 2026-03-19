@@ -19,6 +19,9 @@ class CandyCrush(pufferlib.PufferEnv):
         frosting_layers=2,
         ingredient_target=2,
         ingredient_spawn_rows=2,
+        target_color=3,
+        color_target=30,
+        frosting_target=30,
         reward_per_tile=0.05,
         combo_bonus=0.10,
         invalid_penalty=-0.20,
@@ -41,7 +44,7 @@ class CandyCrush(pufferlib.PufferEnv):
         buf=None,
         seed=0,
     ):
-        obs_size = board_size * board_size * (num_candies * 5 + 6) + board_size * board_size * 4
+        obs_size = board_size * board_size * (num_candies * 5 + 8) + board_size * board_size * 4
         self.single_observation_space = gymnasium.spaces.Box(
             low=0, high=255, shape=(obs_size,), dtype=np.uint8
         )
@@ -58,6 +61,9 @@ class CandyCrush(pufferlib.PufferEnv):
         self.frosting_layers = frosting_layers
         self.ingredient_target = ingredient_target
         self.ingredient_spawn_rows = ingredient_spawn_rows
+        self.target_color = target_color
+        self.color_target = color_target
+        self.frosting_target = frosting_target
         self.reward_per_tile = reward_per_tile
         self.combo_bonus = combo_bonus
         self.invalid_penalty = invalid_penalty
@@ -93,6 +99,9 @@ class CandyCrush(pufferlib.PufferEnv):
             frosting_layers=self.frosting_layers,
             ingredient_target=self.ingredient_target,
             ingredient_spawn_rows=self.ingredient_spawn_rows,
+            target_color=self.target_color,
+            color_target=self.color_target,
+            frosting_target=self.frosting_target,
             reward_per_tile=self.reward_per_tile,
             combo_bonus=self.combo_bonus,
             invalid_penalty=self.invalid_penalty,

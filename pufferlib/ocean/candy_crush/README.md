@@ -17,13 +17,17 @@ into the standard PufferLib CLI as `puffer_candy_crush`.
 - T/L intersections create wrapped candies
 - 2x2 squares create fish
 - Direct striped, wrapped, color bomb, and fish combos resolve in C
-- Level goals: `score`, `clear all jelly`, or `drop all ingredients`
+- Level goals: `score`, `clear all jelly`, `drop all ingredients`,
+  `collect a target color`, or `clear blocker tiles`
 - Blockers: layered frosting plus jelly underlay tiles
 - Ingredients: non-swappable pieces that fall with gravity and exit from the bottom row
 - Legal action masking: the observation includes a per-action legality mask and
   the CandyCrush policy masks invalid swaps before sampling
-- Adaptive curriculum: starts from easier variants of the configured goal and
-  unlocks harder levels when the frontier win rate crosses a threshold
+- Campaign levels: the early level bank starts with "collect blue candies"
+  stages, then transitions into blocker-clearing stages that unlock closed-off
+  board regions, with pre-placed starter specials on selected levels
+- Adaptive curriculum: unlocks harder authored levels when the frontier win
+  rate crosses a threshold and still replays earlier levels occasionally
 
 ## CLI
 
@@ -40,6 +44,8 @@ Useful curriculum knobs in `candy_crush.ini` or CLI env overrides:
 - `curriculum_mode = 1` enables adaptive progression from easy to hard
 - `curriculum_min_episodes`, `curriculum_threshold`, `curriculum_replay_prob`
   control unlock speed and replay of earlier levels
+- `target_color`, `color_target`, and `frosting_target` define the explicit
+  target when you disable curriculum and run a fixed custom level profile
 
 ## Notes
 
