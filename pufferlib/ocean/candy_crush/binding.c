@@ -22,6 +22,13 @@ static int my_init(Env* env, PyObject* args, PyObject* kwargs) {
     env->success_bonus = unpack(kwargs, "success_bonus");
     env->jelly_density = unpack(kwargs, "jelly_density");
     env->frosting_density = unpack(kwargs, "frosting_density");
+    env->level_id = unpack(kwargs, "level_id");
+    env->curriculum_mode = unpack(kwargs, "curriculum_mode");
+    env->curriculum_start_level = unpack(kwargs, "curriculum_start_level");
+    env->curriculum_max_level = unpack(kwargs, "curriculum_max_level");
+    env->curriculum_min_episodes = unpack(kwargs, "curriculum_min_episodes");
+    env->curriculum_threshold = unpack(kwargs, "curriculum_threshold");
+    env->curriculum_replay_prob = unpack(kwargs, "curriculum_replay_prob");
     init_env(env);
     c_reset(env);
     return 0;
@@ -41,5 +48,8 @@ static int my_log(PyObject* dict, Log* log) {
     assign_to_dict(dict, "frosting_cleared", log->frosting_cleared);
     assign_to_dict(dict, "ingredient_dropped", log->ingredient_dropped);
     assign_to_dict(dict, "level_wins", log->level_wins);
+    assign_to_dict(dict, "level_id", log->level_id);
+    assign_to_dict(dict, "unlocked_level", log->unlocked_level);
+    assign_to_dict(dict, "curriculum_win_rate", log->curriculum_win_rate);
     return 0;
 }

@@ -50,8 +50,16 @@ class CandyCrush(nn.Module):
         action_mask = observations[:, self.feature_dim:] > 0
         missing = ~action_mask.any(dim=1)
         if missing.any():
-            action_mask = action_mask.clone()
-            action_mask[missing] = True
+            missing_count = int(missing.sum().item())
+            batch_size = int(observations.shape[0])
+            raise RuntimeError(
+                'CandyCrush action mask is empty for '
+                f'{missing_count}/{batch_size} observations. '
+                'This usually means the C extension and Python observation '
+                'shape are out of sync. Rebuild the environment with '
+                '`python -m pip install -e . --no-build-isolation` and '
+                '`python setup.py build_ext --inplace --force`.'
+            )
         self.action_mask = action_mask
         return self.encoder(features)
 

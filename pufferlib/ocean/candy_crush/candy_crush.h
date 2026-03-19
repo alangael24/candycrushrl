@@ -12,6 +12,7 @@
 #define MAX_CANDIES 8
 #define MAX_COMPONENTS (MAX_BOARD * MAX_BOARD)
 #define MAX_EFFECTS 1024
+#define MAX_LEVEL_BANK 12
 #define COLOR_MASK 0x0F
 #define TYPE_SHIFT 4
 #define SPECIAL_LAYERS 5
@@ -24,6 +25,7 @@ typedef struct {
     float score, episode_return, episode_length, total_cleared, invalid_swaps;
     float successful_swaps, total_cascades, max_combo, reshuffles;
     float jelly_cleared, frosting_cleared, ingredient_dropped, level_wins, n;
+    float level_id, unlocked_level, curriculum_win_rate;
 } Log;
 
 typedef struct { int kind, row, col, color, count; } Effect;
@@ -68,6 +70,28 @@ typedef struct {
     float jelly_density;
     float frosting_density;
 
+    int base_max_steps;
+    int base_objective_mode;
+    int base_score_target;
+    int base_frosting_layers;
+    int base_ingredient_target;
+    int base_ingredient_spawn_rows;
+    float base_jelly_density;
+    float base_frosting_density;
+
+    int level_id;
+    int curriculum_mode;
+    int curriculum_start_level;
+    int curriculum_max_level;
+    int curriculum_min_episodes;
+    int active_level;
+    int unlocked_level;
+    int frontier_level;
+    int frontier_episodes;
+    int frontier_wins;
+    float curriculum_threshold;
+    float curriculum_replay_prob;
+
     int steps, score, total_cleared, invalid_swaps, successful_swaps;
     int total_cascades, max_combo, reshuffles;
     int jelly_total, jelly_remaining, jelly_cleared, frosting_cleared;
@@ -94,6 +118,7 @@ static const char CANDY_SYMBOLS[MAX_CANDIES + 1] = {'.', 'A', 'B', 'C', 'D', 'E'
 
 static inline int max_int(int a, int b) { return a > b ? a : b; }
 static inline int min_int(int a, int b) { return a < b ? a : b; }
+static inline int clamp_int(int value, int low, int high) { return min_int(high, max_int(low, value)); }
 static inline bool in_bounds(CandyCrush* env, int row, int col) { return row >= 0 && row < env->board_size && col >= 0 && col < env->board_size; }
 static inline unsigned char make_cell(int color, SpecialType special) { return (unsigned char)(((int)special << TYPE_SHIFT) | (color & COLOR_MASK)); }
 static inline int cell_color(unsigned char cell) { return cell & COLOR_MASK; }
@@ -116,6 +141,8 @@ static inline int goal_layer(CandyCrush* env) { return SPECIAL_LAYERS * env->num
 static inline int steps_layer(CandyCrush* env) { return SPECIAL_LAYERS * env->num_candies + 5; }
 static inline bool is_legal_swap(CandyCrush* env, int row, int col, int nrow, int ncol);
 static inline int swap_match_color(CandyCrush* env, int row, int col, int srow, int scol, unsigned char scell, int trow, int tcol, unsigned char tcell);
+static inline float lerp_float(float start, float end, float t) { return start + (end - start) * t; }
+static inline int lerp_int(int start, int end, float t) { return (int)(lerp_float((float)start, (float)end, t) + 0.5f); }
 
 static inline float clamp01(float value) {
     if (value < 0.0f) return 0.0f;
@@ -137,6 +164,95 @@ static inline bool goal_complete(CandyCrush* env) {
     if (env->objective_mode == GOAL_SCORE) return env->score >= env->score_target;
     if (env->objective_mode == GOAL_JELLY) return env->jelly_remaining <= 0;
     return env->ingredient_remaining <= 0;
+}
+
+static inline float curriculum_win_rate(CandyCrush* env) {
+    return env->frontier_episodes > 0 ? (float)env->frontier_wins / env->frontier_episodes : 0.0f;
+}
+
+static inline float level_progress(CandyCrush* env, int level) {
+    const int start = clamp_int(env->curriculum_start_level, 0, MAX_LEVEL_BANK - 1);
+    const int finish = clamp_int(env->curriculum_max_level, start, MAX_LEVEL_BANK - 1);
+    const int span = max_int(1, finish - start);
+    return clamp01((float)(level - start) / span);
+}
+
+static void restore_base_profile(CandyCrush* env) {
+    env->max_steps = env->base_max_steps;
+    env->objective_mode = env->base_objective_mode;
+    env->score_target = env->base_score_target;
+    env->frosting_layers = env->base_frosting_layers;
+    env->ingredient_target = env->base_ingredient_target;
+    env->ingredient_spawn_rows = env->base_ingredient_spawn_rows;
+    env->jelly_density = env->base_jelly_density;
+    env->frosting_density = env->base_frosting_density;
+}
+
+static void apply_level_profile(CandyCrush* env, int level) {
+    const float t = level_progress(env, level);
+    restore_base_profile(env);
+    if (env->base_objective_mode == GOAL_SCORE) {
+        const int easy_target = max_int(24, env->base_score_target / 3);
+        const int hard_target = max_int(env->base_score_target, (int)(env->base_score_target * 1.15f));
+        env->objective_mode = GOAL_SCORE;
+        env->score_target = lerp_int(easy_target, hard_target, t);
+        env->max_steps = lerp_int(env->base_max_steps + 10, max_int(12, env->base_max_steps - 3), t);
+        env->frosting_density = lerp_float(0.0f, min_int(100, (int)((env->base_frosting_density * 1.25f + 0.02f) * 100)) / 100.0f, t);
+        env->frosting_layers = max_int(1, lerp_int(1, env->base_frosting_layers, t));
+        env->jelly_density = 0.0f;
+        env->ingredient_target = 0;
+    } else if (env->base_objective_mode == GOAL_INGREDIENT) {
+        const int hard_target = max_int(env->base_ingredient_target, 2);
+        env->objective_mode = GOAL_INGREDIENT;
+        env->ingredient_target = lerp_int(1, hard_target, t);
+        env->ingredient_spawn_rows = max_int(1, lerp_int(1, env->base_ingredient_spawn_rows, t));
+        env->max_steps = lerp_int(env->base_max_steps + 10, max_int(14, env->base_max_steps - 3), t);
+        env->frosting_density = lerp_float(0.0f, min_int(100, (int)((env->base_frosting_density * 1.25f + 0.02f) * 100)) / 100.0f, t);
+        env->frosting_layers = max_int(1, lerp_int(1, env->base_frosting_layers, t));
+        env->jelly_density = 0.0f;
+        env->score_target = env->base_score_target;
+    } else {
+        const float easy_jelly = max_int(5, (int)(env->base_jelly_density * 25.0f)) / 100.0f;
+        const float hard_jelly = min_int(85, max_int((int)(env->base_jelly_density * 100.0f), (int)((env->base_jelly_density * 1.15f + 0.03f) * 100.0f))) / 100.0f;
+        const float hard_frosting = min_int(45, max_int((int)(env->base_frosting_density * 100.0f), (int)((env->base_frosting_density * 1.30f + 0.02f) * 100.0f))) / 100.0f;
+        env->objective_mode = GOAL_JELLY;
+        env->max_steps = lerp_int(env->base_max_steps + 12, max_int(16, env->base_max_steps - 4), t);
+        env->jelly_density = lerp_float(easy_jelly, hard_jelly, t);
+        env->frosting_density = lerp_float(0.0f, hard_frosting, t);
+        env->frosting_layers = max_int(1, lerp_int(1, env->base_frosting_layers + (env->base_frosting_density > 0.0f ? 1 : 0), t));
+        env->ingredient_target = env->base_ingredient_target;
+        env->score_target = env->base_score_target;
+    }
+}
+
+static int select_active_level(CandyCrush* env) {
+    if (env->level_id >= 0) return clamp_int(env->level_id, env->curriculum_start_level, env->curriculum_max_level);
+    if (env->curriculum_mode == 0) return -1;
+    if (env->unlocked_level > env->curriculum_start_level
+        && ((float)rand() / RAND_MAX) < env->curriculum_replay_prob) {
+        const int replay_count = env->unlocked_level - env->curriculum_start_level;
+        return env->curriculum_start_level + rand() % replay_count;
+    }
+    return env->frontier_level;
+}
+
+static void maybe_advance_curriculum(CandyCrush* env) {
+    if (env->curriculum_mode == 0 || env->level_id >= 0) return;
+    if (env->frontier_episodes < env->curriculum_min_episodes) return;
+    if (curriculum_win_rate(env) < env->curriculum_threshold) return;
+    if (env->unlocked_level >= env->curriculum_max_level) return;
+    env->unlocked_level++;
+    env->frontier_level = env->unlocked_level;
+    env->frontier_episodes = 0;
+    env->frontier_wins = 0;
+}
+
+static void record_curriculum_result(CandyCrush* env, bool won) {
+    if (env->curriculum_mode == 0 || env->level_id >= 0) return;
+    if (env->active_level != env->frontier_level) return;
+    env->frontier_episodes++;
+    if (won) env->frontier_wins++;
+    maybe_advance_curriculum(env);
 }
 
 static inline int obs_layer(CandyCrush* env, unsigned char cell) {
@@ -742,6 +858,9 @@ static void reshuffle_board(CandyCrush* env) {
 }
 
 static void reset_episode(CandyCrush* env) {
+    env->active_level = select_active_level(env);
+    if (env->active_level >= 0) apply_level_profile(env, env->active_level);
+    else restore_base_profile(env);
     env->steps = env->score = env->total_cleared = env->invalid_swaps = env->successful_swaps = 0;
     env->total_cascades = env->max_combo = env->reshuffles = 0;
     env->jelly_cleared = env->frosting_cleared = env->level_won = 0;
@@ -767,6 +886,9 @@ static void write_episode_log(CandyCrush* env) {
     env->log.frosting_cleared += env->frosting_cleared;
     env->log.ingredient_dropped += env->ingredients_dropped;
     env->log.level_wins += env->level_won;
+    env->log.level_id += env->active_level >= 0 ? env->active_level : 0.0f;
+    env->log.unlocked_level += env->unlocked_level;
+    env->log.curriculum_win_rate += curriculum_win_rate(env);
     env->log.n += 1.0f;
 }
 
@@ -793,6 +915,26 @@ static void init_env(CandyCrush* env) {
     if (env->ingredient_spawn_rows < 1) env->ingredient_spawn_rows = 1;
     env->jelly_density = clamp01(env->jelly_density);
     env->frosting_density = clamp01(env->frosting_density);
+    env->level_id = max_int(-1, env->level_id);
+    env->curriculum_mode = env->curriculum_mode != 0;
+    env->curriculum_start_level = clamp_int(env->curriculum_start_level, 0, MAX_LEVEL_BANK - 1);
+    env->curriculum_max_level = clamp_int(env->curriculum_max_level, env->curriculum_start_level, MAX_LEVEL_BANK - 1);
+    if (env->curriculum_min_episodes < 1) env->curriculum_min_episodes = 1;
+    env->curriculum_threshold = clamp01(env->curriculum_threshold);
+    env->curriculum_replay_prob = clamp01(env->curriculum_replay_prob);
+    env->base_max_steps = env->max_steps;
+    env->base_objective_mode = env->objective_mode;
+    env->base_score_target = env->score_target;
+    env->base_frosting_layers = env->frosting_layers;
+    env->base_ingredient_target = env->ingredient_target;
+    env->base_ingredient_spawn_rows = env->ingredient_spawn_rows;
+    env->base_jelly_density = env->jelly_density;
+    env->base_frosting_density = env->frosting_density;
+    env->active_level = env->level_id >= 0 ? clamp_int(env->level_id, env->curriculum_start_level, env->curriculum_max_level) : -1;
+    env->unlocked_level = env->active_level >= 0 ? env->active_level : env->curriculum_start_level;
+    env->frontier_level = env->active_level >= 0 ? env->active_level : env->curriculum_start_level;
+    env->frontier_episodes = 0;
+    env->frontier_wins = 0;
     memset(&env->log, 0, sizeof(Log));
 }
 
@@ -823,6 +965,7 @@ static void c_step(CandyCrush* env) {
         env->rewards[0] = reward;
         update_observations(env);
         env->terminals[0] = 1;
+        record_curriculum_result(env, true);
         write_episode_log(env);
         reset_episode(env);
         env->rewards[0] = reward;
@@ -830,7 +973,7 @@ static void c_step(CandyCrush* env) {
     }
     env->episode_return += reward; env->rewards[0] = reward; update_observations(env);
     if (env->steps >= env->max_steps) {
-        env->terminals[0] = 1; write_episode_log(env); reset_episode(env); env->rewards[0] = reward;
+        env->terminals[0] = 1; record_curriculum_result(env, false); write_episode_log(env); reset_episode(env); env->rewards[0] = reward;
     }
 }
 
@@ -878,11 +1021,11 @@ static void c_render(CandyCrush* env) {
         snprintf(label, sizeof(label), "%c", CANDY_SYMBOLS[color]); DrawText(label, x + 22, y + 12, 22, PUFF_WHITE);
         if (special_marker(candy) != ' ') { snprintf(label, sizeof(label), "%c", special_marker(candy)); DrawText(label, x + 22, y + 32, 18, PUFF_WHITE); }
     }
-    snprintf(label, sizeof(label), "Goal: %s", goal_name(env)); DrawText(label, 12, env->board_size * cell + 8, 22, PUFF_WHITE);
+    snprintf(label, sizeof(label), "Level: %d  Unlocked: %d  Goal: %s", env->active_level >= 0 ? env->active_level : 0, env->unlocked_level, goal_name(env)); DrawText(label, 12, env->board_size * cell + 8, 22, PUFF_WHITE);
     snprintf(label, sizeof(label), "Score: %d  Steps: %d/%d", env->score, env->steps, env->max_steps); DrawText(label, 12, env->board_size * cell + 34, 22, PUFF_WHITE);
     snprintf(label, sizeof(label), "Jelly: %d/%d  Frosting cleared: %d", env->jelly_cleared, env->jelly_total, env->frosting_cleared); DrawText(label, 12, env->board_size * cell + 60, 20, PUFF_WHITE);
     snprintf(label, sizeof(label), "Ingredients: %d/%d  Combo: %d", env->ingredients_dropped, env->ingredient_total, env->max_combo); DrawText(label, 12, env->board_size * cell + 84, 20, PUFF_WHITE);
-    snprintf(label, sizeof(label), "Goal remaining: %.2f", goal_remaining_ratio(env)); DrawText(label, 12, env->board_size * cell + 104, 20, PUFF_WHITE);
+    snprintf(label, sizeof(label), "Goal remaining: %.2f  Curriculum WR: %.2f", goal_remaining_ratio(env), curriculum_win_rate(env)); DrawText(label, 12, env->board_size * cell + 104, 20, PUFF_WHITE);
     EndDrawing();
 }
 

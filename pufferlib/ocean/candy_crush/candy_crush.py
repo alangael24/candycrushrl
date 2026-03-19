@@ -29,6 +29,13 @@ class CandyCrush(pufferlib.PufferEnv):
         success_bonus=3.0,
         jelly_density=0.35,
         frosting_density=0.10,
+        level_id=-1,
+        curriculum_mode=1,
+        curriculum_start_level=0,
+        curriculum_max_level=11,
+        curriculum_min_episodes=32,
+        curriculum_threshold=0.65,
+        curriculum_replay_prob=0.15,
         render_mode='human',
         log_interval=128,
         buf=None,
@@ -61,6 +68,13 @@ class CandyCrush(pufferlib.PufferEnv):
         self.success_bonus = success_bonus
         self.jelly_density = jelly_density
         self.frosting_density = frosting_density
+        self.level_id = level_id
+        self.curriculum_mode = curriculum_mode
+        self.curriculum_start_level = curriculum_start_level
+        self.curriculum_max_level = curriculum_max_level
+        self.curriculum_min_episodes = curriculum_min_episodes
+        self.curriculum_threshold = curriculum_threshold
+        self.curriculum_replay_prob = curriculum_replay_prob
 
         super().__init__(buf)
         self.c_envs = binding.vec_init(
@@ -89,6 +103,13 @@ class CandyCrush(pufferlib.PufferEnv):
             success_bonus=self.success_bonus,
             jelly_density=self.jelly_density,
             frosting_density=self.frosting_density,
+            level_id=self.level_id,
+            curriculum_mode=self.curriculum_mode,
+            curriculum_start_level=self.curriculum_start_level,
+            curriculum_max_level=self.curriculum_max_level,
+            curriculum_min_episodes=self.curriculum_min_episodes,
+            curriculum_threshold=self.curriculum_threshold,
+            curriculum_replay_prob=self.curriculum_replay_prob,
         )
         self.tick = 0
 

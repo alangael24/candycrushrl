@@ -20,6 +20,13 @@ int main() {
         .success_bonus = 3.0f,
         .jelly_density = 0.35f,
         .frosting_density = 0.10f,
+        .level_id = -1,
+        .curriculum_mode = 1,
+        .curriculum_start_level = 0,
+        .curriculum_max_level = 11,
+        .curriculum_min_episodes = 32,
+        .curriculum_threshold = 0.65f,
+        .curriculum_replay_prob = 0.15f,
     };
 
     const int obs_size = env.board_size * env.board_size * (env.num_candies * 5 + 6) + env.board_size * env.board_size * 4;
