@@ -5,9 +5,21 @@ into the standard PufferLib CLI as `puffer_candy_crush`.
 
 ## Shape
 
-- Single-agent match-3 puzzle
+- Single-agent Candy Crush style puzzle
 - Action space: `board_size * board_size * 4`
-- Observation space: flattened one-hot candy planes plus one move-budget plane
+- Observation space: flattened planes for candies/specials plus jelly,
+  frosting, ingredients, goal progress, and move budget
+
+## Mechanics
+
+- 4 in a line creates striped candies
+- 5 in a line creates a color bomb
+- T/L intersections create wrapped candies
+- 2x2 squares create fish
+- Direct striped, wrapped, color bomb, and fish combos resolve in C
+- Level goals: `score`, `clear all jelly`, or `drop all ingredients`
+- Blockers: layered frosting plus jelly underlay tiles
+- Ingredients: non-swappable pieces that fall with gravity and exit from the bottom row
 
 ## CLI
 
@@ -23,4 +35,3 @@ python -m pufferlib.pufferl eval puffer_candy_crush
 - This follows the same Ocean pattern as `template`, `snake`, and `g2048`.
 - On the current upstream `setup.py`, Ocean C builds are supported on Linux/macOS.
 - For Windows, use WSL or PufferTank-style Linux tooling for native builds.
-
