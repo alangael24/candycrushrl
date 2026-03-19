@@ -524,8 +524,39 @@ static float resolve_special_swap(CandyCrush* env, int row, int col, int nrow, i
     return resolve_board(env, &q, false, 0, 0, 0);
 }
 
-static bool would_create_match(CandyCrush* env) {
-    MatchAnalysis a; analyze_matches(env, &a); return has_matches(env, &a);
+static inline bool line_match_at(CandyCrush* env, int row, int col) {
+    const int color = match_color(env->board[row][col]);
+    int count = 1;
+    if (color <= 0) return false;
+    for (int c = col - 1; c >= 0 && match_color(env->board[row][c]) == color; c--) count++;
+    for (int c = col + 1; c < env->board_size && match_color(env->board[row][c]) == color; c++) count++;
+    if (count >= 3) return true;
+    count = 1;
+    for (int r = row - 1; r >= 0 && match_color(env->board[r][col]) == color; r--) count++;
+    for (int r = row + 1; r < env->board_size && match_color(env->board[r][col]) == color; r++) count++;
+    return count >= 3;
+}
+
+static inline bool square_match_at(CandyCrush* env, int row, int col) {
+    const int color = match_color(env->board[row][col]);
+    if (color <= 0) return false;
+    for (int dr = -1; dr <= 0; dr++) for (int dc = -1; dc <= 0; dc++) {
+        const int r0 = row + dr, c0 = col + dc;
+        if (!in_bounds(env, r0, c0) || !in_bounds(env, r0 + 1, c0 + 1)) continue;
+        if (match_color(env->board[r0][c0]) == color
+            && match_color(env->board[r0][c0 + 1]) == color
+            && match_color(env->board[r0 + 1][c0]) == color
+            && match_color(env->board[r0 + 1][c0 + 1]) == color) return true;
+    }
+    return false;
+}
+
+static inline bool local_match_at(CandyCrush* env, int row, int col) {
+    return line_match_at(env, row, col) || square_match_at(env, row, col);
+}
+
+static inline bool swap_creates_match(CandyCrush* env, int row, int col, int nrow, int ncol) {
+    return local_match_at(env, row, col) || local_match_at(env, nrow, ncol);
 }
 
 static inline bool swappable_cell(CandyCrush* env, int row, int col) {
@@ -540,7 +571,7 @@ static bool has_legal_moves(CandyCrush* env) {
         if (auto_swap(env->board[row][col], env->board[nr][nc])) return true;
         swap_cells(env, row, col, nr, nc);
         {
-            const bool legal = would_create_match(env);
+            const bool legal = swap_creates_match(env, row, col, nr, nc);
             swap_cells(env, row, col, nr, nc);
             if (legal) return true;
         }
@@ -715,7 +746,7 @@ static void c_step(CandyCrush* env) {
         const unsigned char first = env->board[row][col], second = env->board[nrow][ncol];
         swap_cells(env, row, col, nrow, ncol);
         if (auto_swap(first, second)) { env->successful_swaps++; reward = resolve_special_swap(env, row, col, nrow, ncol, first, second); }
-        else if (!would_create_match(env)) { swap_cells(env, row, col, nrow, ncol); reward = env->invalid_penalty; env->invalid_swaps++; }
+        else if (!swap_creates_match(env, row, col, nrow, ncol)) { swap_cells(env, row, col, nrow, ncol); reward = env->invalid_penalty; env->invalid_swaps++; }
         else { env->successful_swaps++; reward = resolve_board(env, NULL, true, nrow, ncol, dir); }
         if (!goal_complete(env) && !has_legal_moves(env)) { reshuffle_board(env); env->reshuffles++; reward += env->shuffle_penalty; }
     }
