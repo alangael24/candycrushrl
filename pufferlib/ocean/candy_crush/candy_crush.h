@@ -69,6 +69,9 @@ typedef struct {
     float jelly_reward;
     float frosting_reward;
     float ingredient_reward;
+    float color_reward;
+    float color_tile_scale;
+    float color_combo_scale;
     float success_bonus;
     float jelly_density;
     float frosting_density;
@@ -188,6 +191,18 @@ static inline float curriculum_win_rate(CandyCrush* env) {
     return env->frontier_episodes > 0 ? (float)env->frontier_wins / env->frontier_episodes : 0.0f;
 }
 
+static inline float objective_tile_reward(CandyCrush* env) {
+    return env->objective_mode == GOAL_COLOR
+        ? env->reward_per_tile * env->color_tile_scale
+        : env->reward_per_tile;
+}
+
+static inline float objective_combo_bonus(CandyCrush* env) {
+    return env->objective_mode == GOAL_COLOR
+        ? env->combo_bonus * env->color_combo_scale
+        : env->combo_bonus;
+}
+
 static inline float level_progress(CandyCrush* env, int level) {
     const int start = clamp_int(env->curriculum_start_level, 0, MAX_LEVEL_BANK - 1);
     const int finish = clamp_int(env->curriculum_max_level, start, MAX_LEVEL_BANK - 1);
@@ -219,17 +234,18 @@ static void apply_level_profile(CandyCrush* env, int level) {
         case 0:
             env->objective_mode = GOAL_COLOR;
             env->target_color = 3;
-            env->color_target = 20;
-            env->max_steps = 24;
+            env->color_target = 16;
+            env->max_steps = 26;
             env->starter_striped = 1;
+            env->starter_wrapped = 1;
             env->jelly_density = 0.0f;
             env->frosting_density = 0.0f;
             break;
         case 1:
             env->objective_mode = GOAL_COLOR;
             env->target_color = 3;
-            env->color_target = 30;
-            env->max_steps = 28;
+            env->color_target = 24;
+            env->max_steps = 30;
             env->starter_striped = 1;
             env->starter_wrapped = 1;
             env->jelly_density = 0.0f;
@@ -238,8 +254,8 @@ static void apply_level_profile(CandyCrush* env, int level) {
         case 2:
             env->objective_mode = GOAL_COLOR;
             env->target_color = 3;
-            env->color_target = 35;
-            env->max_steps = 30;
+            env->color_target = 30;
+            env->max_steps = 32;
             env->starter_striped = 2;
             env->starter_wrapped = 1;
             env->jelly_density = 0.0f;
@@ -660,6 +676,8 @@ static void refill_board(CandyCrush* env) {
 static float resolve_board(CandyCrush* env, EffectQueue* seed, bool prefer, int pref_row, int pref_col, int move_dir) {
     EffectQueue cur = {0}, post = {0};
     float reward = 0.0f;
+    const float tile_reward = objective_tile_reward(env);
+    const float combo_reward = objective_combo_bonus(env);
     int combo = 0;
     bool used_prefer = false;
     if (seed != NULL) cur = *seed;
@@ -695,11 +713,12 @@ static float resolve_board(CandyCrush* env, EffectQueue* seed, bool prefer, int 
                 stats.ingredients += dropped;
                 apply_gravity(env);
             }
-            reward += stats.candies * env->reward_per_tile
+            reward += stats.candies * tile_reward
                 + stats.jelly * env->jelly_reward
                 + stats.frosting * env->frosting_reward
-                + stats.ingredients * env->ingredient_reward;
-            if (combo > 1) reward += (combo - 1) * env->combo_bonus;
+                + stats.ingredients * env->ingredient_reward
+                + stats.color * env->color_reward;
+            if (combo > 1) reward += (combo - 1) * combo_reward;
             refill_board(env);
         }
         if (post.count > 0) { cur = post; post.count = 0; } else cur.count = 0;
@@ -1122,6 +1141,9 @@ static void init_env(CandyCrush* env) {
     if (env->target_color < 0) env->target_color = 0;
     if (env->color_target < 0) env->color_target = 0;
     if (env->frosting_target < 0) env->frosting_target = 0;
+    if (env->color_reward < 0.0f) env->color_reward = 0.0f;
+    if (env->color_tile_scale < 0.0f) env->color_tile_scale = 0.0f;
+    if (env->color_combo_scale < 0.0f) env->color_combo_scale = 0.0f;
     env->jelly_density = clamp01(env->jelly_density);
     env->frosting_density = clamp01(env->frosting_density);
     env->level_id = max_int(-1, env->level_id);
@@ -1129,7 +1151,9 @@ static void init_env(CandyCrush* env) {
     env->curriculum_start_level = clamp_int(env->curriculum_start_level, 0, MAX_LEVEL_BANK - 1);
     env->curriculum_max_level = clamp_int(env->curriculum_max_level, env->curriculum_start_level, MAX_LEVEL_BANK - 1);
     if (env->curriculum_min_episodes < 1) env->curriculum_min_episodes = 1;
+    if (env->curriculum_min_episodes < 16) env->curriculum_min_episodes = 16;
     env->curriculum_threshold = clamp01(env->curriculum_threshold);
+    if (env->curriculum_threshold < 0.40f) env->curriculum_threshold = 0.40f;
     env->curriculum_replay_prob = clamp01(env->curriculum_replay_prob);
     env->base_max_steps = env->max_steps;
     env->base_objective_mode = env->objective_mode;

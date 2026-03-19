@@ -20,6 +20,9 @@ int main() {
         .jelly_reward = 0.20f,
         .frosting_reward = 0.10f,
         .ingredient_reward = 1.0f,
+        .color_reward = 0.35f,
+        .color_tile_scale = 0.20f,
+        .color_combo_scale = 0.50f,
         .success_bonus = 3.0f,
         .jelly_density = 0.35f,
         .frosting_density = 0.10f,
@@ -27,8 +30,8 @@ int main() {
         .curriculum_mode = 1,
         .curriculum_start_level = 0,
         .curriculum_max_level = 11,
-        .curriculum_min_episodes = 32,
-        .curriculum_threshold = 0.65f,
+        .curriculum_min_episodes = 16,
+        .curriculum_threshold = 0.40f,
         .curriculum_replay_prob = 0.15f,
     };
 

@@ -29,6 +29,9 @@ class CandyCrush(pufferlib.PufferEnv):
         jelly_reward=0.20,
         frosting_reward=0.10,
         ingredient_reward=1.0,
+        color_reward=0.35,
+        color_tile_scale=0.20,
+        color_combo_scale=0.50,
         success_bonus=3.0,
         jelly_density=0.35,
         frosting_density=0.10,
@@ -71,6 +74,9 @@ class CandyCrush(pufferlib.PufferEnv):
         self.jelly_reward = jelly_reward
         self.frosting_reward = frosting_reward
         self.ingredient_reward = ingredient_reward
+        self.color_reward = color_reward
+        self.color_tile_scale = color_tile_scale
+        self.color_combo_scale = color_combo_scale
         self.success_bonus = success_bonus
         self.jelly_density = jelly_density
         self.frosting_density = frosting_density
@@ -109,6 +115,9 @@ class CandyCrush(pufferlib.PufferEnv):
             jelly_reward=self.jelly_reward,
             frosting_reward=self.frosting_reward,
             ingredient_reward=self.ingredient_reward,
+            color_reward=self.color_reward,
+            color_tile_scale=self.color_tile_scale,
+            color_combo_scale=self.color_combo_scale,
             success_bonus=self.success_bonus,
             jelly_density=self.jelly_density,
             frosting_density=self.frosting_density,

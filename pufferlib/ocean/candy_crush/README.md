@@ -26,6 +26,9 @@ into the standard PufferLib CLI as `puffer_candy_crush`.
 - Campaign levels: the early level bank starts with "collect blue candies"
   stages, then transitions into blocker-clearing stages that unlock closed-off
   board regions, with pre-placed starter specials on selected levels
+- Color-goal shaping: `GOAL_COLOR` pays an extra `color_reward` for each target
+  candy cleared and down-weights generic clear/combo rewards so early levels
+  train the target-color skill instead of raw score farming
 - Adaptive curriculum: unlocks harder authored levels when the frontier win
   rate crosses a threshold and still replays earlier levels occasionally
 
@@ -46,6 +49,8 @@ Useful curriculum knobs in `candy_crush.ini` or CLI env overrides:
   control unlock speed and replay of earlier levels
 - `target_color`, `color_target`, and `frosting_target` define the explicit
   target when you disable curriculum and run a fixed custom level profile
+- `color_reward`, `color_tile_scale`, and `color_combo_scale` tune how strongly
+  collect-color levels prioritize the requested candy over generic clears
 
 ## Notes
 

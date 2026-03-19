@@ -22,6 +22,9 @@ static int my_init(Env* env, PyObject* args, PyObject* kwargs) {
     env->jelly_reward = unpack(kwargs, "jelly_reward");
     env->frosting_reward = unpack(kwargs, "frosting_reward");
     env->ingredient_reward = unpack(kwargs, "ingredient_reward");
+    env->color_reward = unpack(kwargs, "color_reward");
+    env->color_tile_scale = unpack(kwargs, "color_tile_scale");
+    env->color_combo_scale = unpack(kwargs, "color_combo_scale");
     env->success_bonus = unpack(kwargs, "success_bonus");
     env->jelly_density = unpack(kwargs, "jelly_density");
     env->frosting_density = unpack(kwargs, "frosting_density");
