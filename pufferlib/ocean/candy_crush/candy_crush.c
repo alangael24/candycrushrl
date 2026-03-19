@@ -22,7 +22,7 @@ int main() {
         .frosting_density = 0.10f,
     };
 
-    const int obs_size = env.board_size * env.board_size * (env.num_candies * 5 + 6);
+    const int obs_size = env.board_size * env.board_size * (env.num_candies * 5 + 6) + env.board_size * env.board_size * 4;
     env.observations = (unsigned char*)calloc(obs_size, sizeof(unsigned char));
     env.actions = (int*)calloc(1, sizeof(int));
     env.rewards = (float*)calloc(1, sizeof(float));

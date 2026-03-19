@@ -8,7 +8,7 @@ into the standard PufferLib CLI as `puffer_candy_crush`.
 - Single-agent Candy Crush style puzzle
 - Action space: `board_size * board_size * 4`
 - Observation space: flattened planes for candies/specials plus jelly,
-  frosting, ingredients, goal progress, and move budget
+  frosting, ingredients, goal progress, move budget, and legal-action mask
 
 ## Mechanics
 
@@ -20,6 +20,8 @@ into the standard PufferLib CLI as `puffer_candy_crush`.
 - Level goals: `score`, `clear all jelly`, or `drop all ingredients`
 - Blockers: layered frosting plus jelly underlay tiles
 - Ingredients: non-swappable pieces that fall with gravity and exit from the bottom row
+- Legal action masking: the observation includes a per-action legality mask and
+  the CandyCrush policy masks invalid swaps before sampling
 
 ## CLI
 

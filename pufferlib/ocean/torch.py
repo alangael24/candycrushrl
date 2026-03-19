@@ -19,6 +19,49 @@ from pufferlib.pytorch import layer_init, _nativize_dtype, nativize_tensor
 import numpy as np
 
 
+class CandyCrush(nn.Module):
+    def __init__(self, env, hidden_size=256, **kwargs):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.is_continuous = False
+        self.num_actions = env.single_action_space.n
+        self.obs_dim = int(np.prod(env.single_observation_space.shape))
+        self.feature_dim = self.obs_dim - self.num_actions
+        self.encoder = nn.Sequential(
+            layer_init(nn.Linear(self.feature_dim, hidden_size)),
+            nn.GELU(),
+            layer_init(nn.Linear(hidden_size, hidden_size)),
+            nn.GELU(),
+        )
+        self.actor = layer_init(nn.Linear(hidden_size, self.num_actions), std=0.01)
+        self.critic = layer_init(nn.Linear(hidden_size, 1), std=1.0)
+
+    def forward_eval(self, observations, state=None):
+        hidden = self.encode_observations(observations, state=state)
+        logits, values = self.decode_actions(hidden)
+        return logits, values
+
+    def forward(self, observations, state=None):
+        return self.forward_eval(observations, state)
+
+    def encode_observations(self, observations, state=None):
+        observations = observations.view(observations.shape[0], -1).float()
+        features = observations[:, :self.feature_dim] / 255.0
+        action_mask = observations[:, self.feature_dim:] > 0
+        missing = ~action_mask.any(dim=1)
+        if missing.any():
+            action_mask = action_mask.clone()
+            action_mask[missing] = True
+        self.action_mask = action_mask
+        return self.encoder(features)
+
+    def decode_actions(self, hidden):
+        logits = self.actor(hidden)
+        logits = logits.masked_fill(~self.action_mask, -1e9)
+        values = self.critic(hidden)
+        return logits, values
+
+
 class Boids(nn.Module):
     def __init__(self, env, cnn_channels=32, hidden_size=128, **kwargs):
         super().__init__()

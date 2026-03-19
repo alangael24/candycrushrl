@@ -34,7 +34,7 @@ class CandyCrush(pufferlib.PufferEnv):
         buf=None,
         seed=0,
     ):
-        obs_size = board_size * board_size * (num_candies * 5 + 6)
+        obs_size = board_size * board_size * (num_candies * 5 + 6) + board_size * board_size * 4
         self.single_observation_space = gymnasium.spaces.Box(
             low=0, high=255, shape=(obs_size,), dtype=np.uint8
         )

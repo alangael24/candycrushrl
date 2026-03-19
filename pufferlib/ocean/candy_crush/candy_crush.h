@@ -106,12 +106,16 @@ static inline int match_color(unsigned char cell) {
 }
 static inline unsigned char sample_candy(CandyCrush* env) { return make_cell(1 + rand() % env->num_candies, SPECIAL_NONE); }
 static inline int obs_layers(CandyCrush* env) { return SPECIAL_LAYERS * env->num_candies + 6; }
+static inline int action_count(CandyCrush* env) { return env->board_size * env->board_size * 4; }
+static inline int obs_feature_size(CandyCrush* env) { return env->board_size * env->board_size * obs_layers(env); }
 static inline int color_bomb_layer(CandyCrush* env) { return SPECIAL_LAYERS * env->num_candies; }
 static inline int jelly_layer(CandyCrush* env) { return SPECIAL_LAYERS * env->num_candies + 1; }
 static inline int frosting_layer(CandyCrush* env) { return SPECIAL_LAYERS * env->num_candies + 2; }
 static inline int ingredient_layer(CandyCrush* env) { return SPECIAL_LAYERS * env->num_candies + 3; }
 static inline int goal_layer(CandyCrush* env) { return SPECIAL_LAYERS * env->num_candies + 4; }
 static inline int steps_layer(CandyCrush* env) { return SPECIAL_LAYERS * env->num_candies + 5; }
+static inline bool is_legal_swap(CandyCrush* env, int row, int col, int nrow, int ncol);
+static inline int swap_match_color(CandyCrush* env, int row, int col, int srow, int scol, unsigned char scell, int trow, int tcol, unsigned char tcell);
 
 static inline float clamp01(float value) {
     if (value < 0.0f) return 0.0f;
@@ -151,7 +155,8 @@ static inline int obs_layer(CandyCrush* env, unsigned char cell) {
 static void update_observations(CandyCrush* env) {
     const int cells = env->board_size * env->board_size;
     const int layers = obs_layers(env);
-    memset(env->observations, 0, cells * layers);
+    const int feature_size = cells * layers;
+    memset(env->observations, 0, feature_size + action_count(env));
     for (int row = 0; row < env->board_size; row++) for (int col = 0; col < env->board_size; col++) {
         const int idx = row * env->board_size + col;
         const int layer = obs_layer(env, env->board[row][col]);
@@ -165,6 +170,21 @@ static void update_observations(CandyCrush* env) {
         for (int idx = 0; idx < cells; idx++) {
             env->observations[goal_layer(env) * cells + idx] = goal;
             env->observations[steps_layer(env) * cells + idx] = steps;
+        }
+    }
+    {
+        unsigned char* action_mask = env->observations + feature_size;
+        for (int row = 0; row < env->board_size; row++) for (int col = 0; col < env->board_size; col++) {
+            if (col + 1 < env->board_size) {
+                const unsigned char legal = is_legal_swap(env, row, col, row, col + 1) ? 255 : 0;
+                action_mask[(row * env->board_size + col) * 4 + 1] = legal;
+                action_mask[(row * env->board_size + (col + 1)) * 4 + 3] = legal;
+            }
+            if (row + 1 < env->board_size) {
+                const unsigned char legal = is_legal_swap(env, row, col, row + 1, col) ? 255 : 0;
+                action_mask[(row * env->board_size + col) * 4 + 2] = legal;
+                action_mask[((row + 1) * env->board_size + col) * 4 + 0] = legal;
+            }
         }
     }
 }
@@ -559,6 +579,59 @@ static inline bool swap_creates_match(CandyCrush* env, int row, int col, int nro
     return local_match_at(env, row, col) || local_match_at(env, nrow, ncol);
 }
 
+static inline bool swappable_cell(CandyCrush* env, int row, int col);
+
+static inline int swap_match_color(CandyCrush* env, int row, int col, int srow, int scol, unsigned char scell, int trow, int tcol, unsigned char tcell) {
+    if (row == srow && col == scol) return match_color(scell);
+    if (row == trow && col == tcol) return match_color(tcell);
+    return match_color(env->board[row][col]);
+}
+
+static inline bool swap_color_eq(CandyCrush* env, int row, int col, int color, int srow, int scol, unsigned char scell, int trow, int tcol, unsigned char tcell) {
+    return in_bounds(env, row, col)
+        && swap_match_color(env, row, col, srow, scol, scell, trow, tcol, tcell) == color;
+}
+
+static inline bool line_match_after_swap(CandyCrush* env, int row, int col, int srow, int scol, unsigned char scell, int trow, int tcol, unsigned char tcell) {
+    const int color = swap_match_color(env, row, col, srow, scol, scell, trow, tcol, tcell);
+    if (color <= 0) return false;
+    return (swap_color_eq(env, row, col - 1, color, srow, scol, scell, trow, tcol, tcell)
+            && swap_color_eq(env, row, col - 2, color, srow, scol, scell, trow, tcol, tcell))
+        || (swap_color_eq(env, row, col - 1, color, srow, scol, scell, trow, tcol, tcell)
+            && swap_color_eq(env, row, col + 1, color, srow, scol, scell, trow, tcol, tcell))
+        || (swap_color_eq(env, row, col + 1, color, srow, scol, scell, trow, tcol, tcell)
+            && swap_color_eq(env, row, col + 2, color, srow, scol, scell, trow, tcol, tcell))
+        || (swap_color_eq(env, row - 1, col, color, srow, scol, scell, trow, tcol, tcell)
+            && swap_color_eq(env, row - 2, col, color, srow, scol, scell, trow, tcol, tcell))
+        || (swap_color_eq(env, row - 1, col, color, srow, scol, scell, trow, tcol, tcell)
+            && swap_color_eq(env, row + 1, col, color, srow, scol, scell, trow, tcol, tcell))
+        || (swap_color_eq(env, row + 1, col, color, srow, scol, scell, trow, tcol, tcell)
+            && swap_color_eq(env, row + 2, col, color, srow, scol, scell, trow, tcol, tcell));
+}
+
+static inline bool square_match_after_swap(CandyCrush* env, int row, int col, int srow, int scol, unsigned char scell, int trow, int tcol, unsigned char tcell) {
+    const int color = swap_match_color(env, row, col, srow, scol, scell, trow, tcol, tcell);
+    if (color <= 0) return false;
+    for (int dr = -1; dr <= 0; dr++) for (int dc = -1; dc <= 0; dc++) {
+        const int r0 = row + dr, c0 = col + dc;
+        if (!in_bounds(env, r0, c0) || !in_bounds(env, r0 + 1, c0 + 1)) continue;
+        if (swap_match_color(env, r0, c0, srow, scol, scell, trow, tcol, tcell) == color
+            && swap_match_color(env, r0, c0 + 1, srow, scol, scell, trow, tcol, tcell) == color
+            && swap_match_color(env, r0 + 1, c0, srow, scol, scell, trow, tcol, tcell) == color
+            && swap_match_color(env, r0 + 1, c0 + 1, srow, scol, scell, trow, tcol, tcell) == color) return true;
+    }
+    return false;
+}
+
+static inline bool is_legal_swap(CandyCrush* env, int row, int col, int nrow, int ncol) {
+    if (!swappable_cell(env, row, col) || !swappable_cell(env, nrow, ncol)) return false;
+    if (auto_swap(env->board[row][col], env->board[nrow][ncol])) return true;
+    return line_match_after_swap(env, row, col, row, col, env->board[nrow][ncol], nrow, ncol, env->board[row][col])
+        || square_match_after_swap(env, row, col, row, col, env->board[nrow][ncol], nrow, ncol, env->board[row][col])
+        || line_match_after_swap(env, nrow, ncol, row, col, env->board[nrow][ncol], nrow, ncol, env->board[row][col])
+        || square_match_after_swap(env, nrow, ncol, row, col, env->board[nrow][ncol], nrow, ncol, env->board[row][col]);
+}
+
 static inline bool swappable_cell(CandyCrush* env, int row, int col) {
     return in_bounds(env, row, col) && env->frosting[row][col] == 0 && !is_empty(env->board[row][col]) && !is_ingredient(env->board[row][col]);
 }
@@ -567,14 +640,7 @@ static bool has_legal_moves(CandyCrush* env) {
     const int dr[2] = {0, 1}, dc[2] = {1, 0};
     for (int row = 0; row < env->board_size; row++) for (int col = 0; col < env->board_size; col++) for (int i = 0; i < 2; i++) {
         const int nr = row + dr[i], nc = col + dc[i];
-        if (!swappable_cell(env, row, col) || !swappable_cell(env, nr, nc)) continue;
-        if (auto_swap(env->board[row][col], env->board[nr][nc])) return true;
-        swap_cells(env, row, col, nr, nc);
-        {
-            const bool legal = swap_creates_match(env, row, col, nr, nc);
-            swap_cells(env, row, col, nr, nc);
-            if (legal) return true;
-        }
+        if (in_bounds(env, nr, nc) && is_legal_swap(env, row, col, nr, nc)) return true;
     }
     return false;
 }
