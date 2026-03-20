@@ -125,6 +125,7 @@ MAKE_FUNCTIONS = {
     'pong': 'Pong',
     'pool': 'Pool',
     'freeway': 'Freeway',
+    'football_head': 'FootballHead',
     'enduro': 'Enduro',
     'flappy_bird': 'FlappyBird',
     'tetris': 'Tetris',
