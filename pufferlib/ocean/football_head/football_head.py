@@ -19,6 +19,7 @@ class FootballHead(pufferlib.PufferEnv):
         touch_reward=0.01,
         progress_reward=0.002,
         alive_reward=0.001,
+        manual_enemy=False,
         render_mode='human',
         log_interval=128,
         buf=None,
@@ -52,6 +53,7 @@ class FootballHead(pufferlib.PufferEnv):
             touch_reward=touch_reward,
             progress_reward=progress_reward,
             alive_reward=alive_reward,
+            manual_enemy=manual_enemy,
         )
         self.tick = 0
 

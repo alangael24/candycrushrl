@@ -61,6 +61,7 @@ struct FootballHead {
     int tick;
     int player_score;
     int enemy_score;
+    int manual_enemy;
 
     float gravity;
     float move_speed;
@@ -102,6 +103,18 @@ static const Color FH_EYE = (Color){245, 245, 245, 255};
 #endif
 #ifndef KEY_W
 #define KEY_W 87
+#endif
+#ifndef KEY_ENTER
+#define KEY_ENTER 257
+#endif
+#ifndef KEY_RIGHT
+#define KEY_RIGHT 262
+#endif
+#ifndef KEY_LEFT
+#define KEY_LEFT 263
+#endif
+#ifndef KEY_UP
+#define KEY_UP 265
 #endif
 
 static inline float fh_abs(float v) { return v < 0.0f ? -v : v; }
@@ -176,6 +189,18 @@ static inline void fh_bot_policy(FootballHead* env, int* left, int* right, int* 
     *right = dx > 0.02f;
     *jump = fh_on_ground(&env->enemy) && env->ball.y > env->enemy.y + 0.08f && ball_dx < 0.18f;
     *kick = ball_dx < 0.14f && env->ball.y < env->enemy.y + 0.14f;
+}
+
+static inline void fh_enemy_policy(FootballHead* env, int* left, int* right, int* jump, int* kick) {
+    if (env->manual_enemy && IsWindowReady()) {
+        *left = IsKeyDown(KEY_LEFT);
+        *right = IsKeyDown(KEY_RIGHT);
+        *jump = IsKeyPressed(KEY_UP);
+        *kick = IsKeyDown(KEY_ENTER);
+        return;
+    }
+
+    fh_bot_policy(env, left, right, jump, kick);
 }
 
 static inline void fh_integrate_player(HeadPlayer* player, float gravity) {
@@ -342,7 +367,7 @@ static inline void c_step(FootballHead* env) {
         env->jump_velocity
     );
 
-    fh_bot_policy(env, &enemy_left, &enemy_right, &enemy_jump, &enemy_kick);
+    fh_enemy_policy(env, &enemy_left, &enemy_right, &enemy_jump, &enemy_kick);
     fh_apply_player_input(&env->enemy, enemy_left, enemy_right, enemy_jump, env->move_speed, env->jump_velocity);
 
     fh_integrate_player(&env->player, env->gravity);
@@ -432,7 +457,11 @@ static inline void c_render(FootballHead* env) {
     DrawText(label, 16, 16, 28, FH_TEXT);
     snprintf(label, sizeof(label), "Steps %d/%d", env->tick, env->max_steps);
     DrawText(label, 16, 48, 24, FH_TEXT);
-    DrawText("A/D = move, W = jump, SPACE = kick", 16, 78, 22, FH_TEXT);
+    if (env->manual_enemy) {
+        DrawText("Agent: left side  |  You: arrows move, UP jump, ENTER kick", 16, 78, 22, FH_TEXT);
+    } else {
+        DrawText("A/D = move, W = jump, SPACE = kick", 16, 78, 22, FH_TEXT);
+    }
     EndDrawing();
 }
 

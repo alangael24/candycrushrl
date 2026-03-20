@@ -14,6 +14,7 @@ static int my_init(Env* env, PyObject* args, PyObject* kwargs) {
     env->touch_reward = unpack(kwargs, "touch_reward");
     env->progress_reward = unpack(kwargs, "progress_reward");
     env->alive_reward = unpack(kwargs, "alive_reward");
+    env->manual_enemy = unpack(kwargs, "manual_enemy");
     fh_init(env);
     c_reset(env);
     return 0;
