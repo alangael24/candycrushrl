@@ -4,6 +4,7 @@ This repo exposes a lightweight `observe` mode:
 
 - captures config, model version, seeds, aggregated metrics
 - captures cheap episode summaries by default
+- derives cheap rolling metrics from those summaries and trainer logs
 - avoids raw `env_info` payloads unless you opt in
 - writes asynchronously under `--observe-root`
 

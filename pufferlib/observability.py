@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 import uuid
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -155,6 +156,38 @@ def select_matching(flat: dict[str, Any], keys: tuple[str, ...], signal_only: bo
             continue
         selected[key] = to_jsonable(value)
     return selected
+
+
+def to_number(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, (int, float)) and math.isfinite(value):
+        return float(value)
+    return None
+
+
+def update_ema(current: float | None, value: float | None, alpha: float) -> float | None:
+    if value is None:
+        return current
+    if current is None:
+        return value
+    return (1.0 - alpha) * current + alpha * value
+
+
+def rate(values: deque[float]) -> float | None:
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def first_matching_number(values: dict[str, Any], *needles: str) -> float | None:
+    for key, value in values.items():
+        lowered = key.lower()
+        if any(needle in lowered for needle in needles):
+            number = to_number(value)
+            if number is not None:
+                return number
+    return None
 
 
 def find_git_root(start: Path) -> Path | None:
@@ -306,6 +339,17 @@ class SessionLogger:
         self.outcome_keys = parse_csv(args.get("observe_outcome_keys"), DEFAULT_OUTCOME_KEYS)
         self.event_keys = parse_csv(args.get("observe_event_keys"), DEFAULT_EVENT_KEYS)
         self.keep_env_reports = bool(args.get("observe_env_reports", False))
+        self.metric_ema_alpha = 0.2
+        self.episode_window = 128
+        self.reward_rolling_mean = None
+        self.aggregate_reward_ema = None
+        self.entropy_rolling = None
+        self.kl_rolling = None
+        self.recent_failures: deque[float] = deque(maxlen=self.episode_window)
+        self.recent_episode_lengths: deque[float] = deque(maxlen=self.episode_window)
+        self.recent_stagnation: deque[float] = deque(maxlen=self.episode_window)
+        self.last_episode_scalar = None
+        self.short_episode_threshold, self.long_episode_threshold = self._episode_length_thresholds(args)
 
     def on_run_start(self, *, args: dict[str, Any], env_name: str, policy: Any, vecenv: Any) -> None:
         policy_class = f"{policy.__class__.__module__}.{policy.__class__.__name__}"
@@ -362,12 +406,15 @@ class SessionLogger:
         write_json(self.manifest_path, manifest)
 
     def log(self, logs: dict[str, Any], step: int) -> None:
+        self._update_train_rolling_metrics(logs)
+        metrics = dict(logs)
+        metrics.update(self._derived_metrics_payload())
         payload = {
             "event": "aggregate_metrics",
             "run_id": self.run_id,
             "recorded_at": utc_now_iso(),
             "agent_steps": step,
-            "metrics": to_jsonable(logs),
+            "metrics": to_jsonable(metrics),
         }
         if self.writer.put("metrics", payload):
             self.metric_rows += 1
@@ -385,6 +432,7 @@ class SessionLogger:
             recorded_at = utc_now_iso()
 
             if outcomes:
+                self._update_episode_rolling_metrics(outcomes)
                 payload = {
                     "event": "episode_summary",
                     "run_id": self.run_id,
@@ -454,5 +502,86 @@ class SessionLogger:
                 "path": model_path,
                 "sha256": model_sha,
             },
+            "derived_metrics": self._derived_metrics_payload(),
         }
         write_json(self.summary_path, summary)
+
+    def _episode_length_thresholds(self, args: dict[str, Any]) -> tuple[int, int]:
+        env_args = args.get("env", {})
+        max_steps = env_args.get("max_steps")
+        max_steps_number = to_number(max_steps)
+        if max_steps_number is None or max_steps_number <= 0:
+            return 32, 128
+
+        short_threshold = max(1, int(max_steps_number * 0.25))
+        long_threshold = max(short_threshold + 1, int(max_steps_number * 0.75))
+        return short_threshold, long_threshold
+
+    def _update_train_rolling_metrics(self, logs: dict[str, Any]) -> None:
+        reward = first_matching_number(logs, "environment/reward", "reward")
+        entropy = first_matching_number(logs, "losses/entropy", "entropy")
+        kl = first_matching_number(logs, "losses/approx_kl", "approx_kl", "old_approx_kl")
+        self.aggregate_reward_ema = update_ema(self.aggregate_reward_ema, reward, self.metric_ema_alpha)
+        self.entropy_rolling = update_ema(self.entropy_rolling, entropy, self.metric_ema_alpha)
+        self.kl_rolling = update_ema(self.kl_rolling, kl, self.metric_ema_alpha)
+        if self.reward_rolling_mean is None:
+            self.reward_rolling_mean = self.aggregate_reward_ema
+
+    def _update_episode_rolling_metrics(self, outcomes: dict[str, Any]) -> None:
+        scalar = self._episode_scalar(outcomes)
+        length = first_matching_number(outcomes, "episode_length", ".length", " length")
+        failure = self._infer_failure(outcomes, scalar)
+        stagnation = self._infer_stagnation(scalar)
+
+        self.reward_rolling_mean = update_ema(self.reward_rolling_mean, scalar, self.metric_ema_alpha)
+        if failure is not None:
+            self.recent_failures.append(failure)
+        if length is not None:
+            self.recent_episode_lengths.append(length)
+        if stagnation is not None:
+            self.recent_stagnation.append(stagnation)
+        if scalar is not None:
+            self.last_episode_scalar = scalar
+
+    def _episode_scalar(self, outcomes: dict[str, Any]) -> float | None:
+        return first_matching_number(outcomes, "episode_return", "score", "reward", "perf")
+
+    def _infer_failure(self, outcomes: dict[str, Any], scalar: float | None) -> float | None:
+        for key, value in outcomes.items():
+            lowered = key.lower()
+            signal = is_signal(value)
+            if ("failure" in lowered or "loss" in lowered) and signal:
+                return 1.0
+            if ("success" in lowered or "win" in lowered) and signal:
+                return 0.0
+        if scalar is not None:
+            return 1.0 if scalar < 0 else 0.0
+        return None
+
+    def _infer_stagnation(self, scalar: float | None) -> float | None:
+        if scalar is None or self.last_episode_scalar is None:
+            return None
+
+        tolerance = max(0.05, 0.02 * max(abs(self.last_episode_scalar), abs(scalar), 1.0))
+        return 1.0 if abs(scalar - self.last_episode_scalar) <= tolerance else 0.0
+
+    def _short_long_ratio(self) -> float | None:
+        if not self.recent_episode_lengths:
+            return None
+
+        short_count = sum(1 for length in self.recent_episode_lengths if length <= self.short_episode_threshold)
+        long_count = sum(1 for length in self.recent_episode_lengths if length >= self.long_episode_threshold)
+        if long_count == 0:
+            return None
+        return short_count / long_count
+
+    def _derived_metrics_payload(self) -> dict[str, Any]:
+        payload = {
+            "observe/reward_rolling_mean": self.reward_rolling_mean,
+            "observe/failure_rolling_rate": rate(self.recent_failures),
+            "observe/entropy_rolling": self.entropy_rolling,
+            "observe/kl_rolling": self.kl_rolling,
+            "observe/short_long_episode_ratio": self._short_long_ratio(),
+            "observe/stagnation_rate": rate(self.recent_stagnation),
+        }
+        return {key: round(value, 6) for key, value in payload.items() if value is not None}

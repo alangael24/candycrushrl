@@ -69,6 +69,12 @@ def summarize_run(run_dir: Path) -> dict[str, Any] | None:
         "last_agent_steps": pick_metric(last_metrics, "agent_steps"),
         "last_reward": pick_metric(last_metrics, "environment/reward", "reward"),
         "last_loss": pick_metric(last_metrics, "losses/value_loss", "value_loss"),
+        "reward_rolling_mean": pick_metric(last_metrics, "observe/reward_rolling_mean"),
+        "failure_rolling_rate": pick_metric(last_metrics, "observe/failure_rolling_rate"),
+        "entropy_rolling": pick_metric(last_metrics, "observe/entropy_rolling"),
+        "kl_rolling": pick_metric(last_metrics, "observe/kl_rolling"),
+        "short_long_episode_ratio": pick_metric(last_metrics, "observe/short_long_episode_ratio"),
+        "stagnation_rate": pick_metric(last_metrics, "observe/stagnation_rate"),
         "mean_episode_return": round(fmean(episode_returns), 4) if episode_returns else None,
         "mean_episode_length": round(fmean(episode_lengths), 2) if episode_lengths else None,
         "run_dir": str(run_dir),
@@ -88,6 +94,12 @@ def render_dashboard(root: Path, runs: list[dict[str, Any]], output: Path) -> No
             f"<td>{html.escape(str(run.get('duration_s', '')))}</td>"
             f"<td>{html.escape(str(run.get('last_sps', '')))}</td>"
             f"<td>{html.escape(str(run.get('last_reward', '')))}</td>"
+            f"<td>{html.escape(str(run.get('reward_rolling_mean', '')))}</td>"
+            f"<td>{html.escape(str(run.get('failure_rolling_rate', '')))}</td>"
+            f"<td>{html.escape(str(run.get('entropy_rolling', '')))}</td>"
+            f"<td>{html.escape(str(run.get('kl_rolling', '')))}</td>"
+            f"<td>{html.escape(str(run.get('short_long_episode_ratio', '')))}</td>"
+            f"<td>{html.escape(str(run.get('stagnation_rate', '')))}</td>"
             f"<td>{html.escape(str(run.get('mean_episode_return', '')))}</td>"
             f"<td>{html.escape(str(run.get('mean_episode_length', '')))}</td>"
             f"<td>{html.escape(str(run.get('metrics_written', '')))}</td>"
@@ -193,6 +205,12 @@ def render_dashboard(root: Path, runs: list[dict[str, Any]], output: Path) -> No
           <th>duration_s</th>
           <th>last_sps</th>
           <th>last_reward</th>
+          <th>reward_roll</th>
+          <th>failure_roll</th>
+          <th>entropy_roll</th>
+          <th>kl_roll</th>
+          <th>short_long</th>
+          <th>stagnation</th>
           <th>mean_ep_return</th>
           <th>mean_ep_len</th>
           <th>metrics</th>
@@ -212,7 +230,7 @@ def render_dashboard(root: Path, runs: list[dict[str, Any]], output: Path) -> No
     rendered = (
         body.replace("__ROOT__", html.escape(str(root)))
         .replace("__RUNS__", str(len(runs)))
-        .replace("__ROWS__", "\n".join(rows) if rows else '<tr><td colspan="14">No runs found.</td></tr>')
+        .replace("__ROWS__", "\n".join(rows) if rows else '<tr><td colspan="20">No runs found.</td></tr>')
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(rendered, encoding="utf-8")
