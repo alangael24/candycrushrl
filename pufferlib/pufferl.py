@@ -1,5 +1,5 @@
-## puffer [train | eval | sweep] [env_name] [optional args] -- See https://puffer.ai for full detail0
-# This is the same as python -m pufferlib.pufferl [train | eval | sweep] [env_name] [optional args]
+## puffer [train | eval | sweep | observe] [env_name] [optional args] -- See https://puffer.ai for full detail0
+# This is the same as python -m pufferlib.pufferl [train | eval | sweep | observe] [env_name] [optional args]
 # Distributed example: torchrun --standalone --nnodes=1 --nproc-per-node=6 -m pufferlib.pufferl train puffer_nmmo3
 
 import contextlib
@@ -28,6 +28,7 @@ from torch.distributed.elastic.multiprocessing.errors import record
 import torch.utils.cpp_extension
 
 import pufferlib
+import pufferlib.observability
 import pufferlib.sweep
 import pufferlib.vector
 import pufferlib.pytorch
@@ -309,6 +310,10 @@ class PuffeRL:
                     action = np.clip(action, self.vecenv.action_space.low, self.vecenv.action_space.high)
 
             profile('eval_misc', epoch)
+            on_env_infos = getattr(self.logger, 'on_env_infos', None)
+            if callable(on_env_infos) and len(info) > 0:
+                on_env_infos(info, step=self.global_step, uptime=self.uptime)
+
             for i in info:
                 for k, v in pufferlib.unroll_nested_dict(i):
                     if isinstance(v, np.ndarray):
@@ -938,12 +943,17 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None, early_stop
         model.forward_eval = policy.forward_eval
         policy = model.to(local_rank)
 
-    if args['neptune']:
-        logger = NeptuneLogger(args)
-    elif args['wandb']:
-        logger = WandbLogger(args)
+    if logger is None:
+        if args['neptune']:
+            logger = NeptuneLogger(args)
+        elif args['wandb']:
+            logger = WandbLogger(args)
 
     train_config = { **args['train'], 'env': env_name }
+    on_run_start = getattr(logger, 'on_run_start', None)
+    if callable(on_run_start):
+        on_run_start(args=args, env_name=env_name, policy=policy, vecenv=vecenv)
+
     pufferl = PuffeRL(train_config, vecenv, policy, logger)
 
     # Sweep needs data for early stopped runs, so send data when steps > 100M
@@ -990,6 +1000,39 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None, early_stop
     model_path = pufferl.close()
     pufferl.logger.close(model_path, early_stop=False)
     return all_logs
+
+def observe(env_name, args=None, vecenv=None, policy=None, logger=None, early_stop_fn=None):
+    args = args or load_config(env_name)
+    if logger is not None:
+        return train(
+            env_name,
+            args=args,
+            vecenv=vecenv,
+            policy=policy,
+            logger=logger,
+            early_stop_fn=early_stop_fn,
+        )
+
+    remote_logger = None
+    if args['neptune']:
+        remote_logger = NeptuneLogger(args)
+    elif args['wandb']:
+        remote_logger = WandbLogger(args)
+
+    session_logger = pufferlib.observability.SessionLogger(
+        args,
+        env_name=env_name,
+        run_id=getattr(remote_logger, 'run_id', None),
+    )
+    composite = pufferlib.observability.CompositeLogger(session_logger, remote_logger)
+    return train(
+        env_name,
+        args=args,
+        vecenv=vecenv,
+        policy=policy,
+        logger=composite,
+        early_stop_fn=early_stop_fn,
+    )
 
 def eval(env_name, args=None, vecenv=None, policy=None):
     args = args or load_config(env_name)
@@ -1274,6 +1317,17 @@ def make_parser():
     parser.add_argument('--no-model-upload', action='store_true', help='Do not upload models to wandb or neptune')
     parser.add_argument('--local-rank', type=int, default=0, help='Used by torchrun for DDP')
     parser.add_argument('--tag', type=str, default=None, help='Tag for experiment')
+    parser.add_argument('--observe-root', type=str, default='observability', help='Directory where observe mode writes captured session data')
+    parser.add_argument('--observe-model-version', type=str, default='auto', help='Model version string recorded by observe mode')
+    parser.add_argument('--observe-note', type=str, default=None, help='Optional note recorded in observe manifests')
+    parser.add_argument('--observe-queue-size', type=int, default=4096, help='Queue size for asynchronous observe writes')
+    parser.add_argument('--observe-outcome-keys', type=str, default=None, help='Comma separated substrings used to extract cheap episode summaries from env infos')
+    parser.add_argument('--observe-event-keys', type=str, default=None, help='Comma separated substrings used to extract sparse key events from env infos')
+    parser.add_argument('--observe-code-version', action=argparse.BooleanOptionalAction, default=True, help='Record lightweight code version metadata in observe manifests')
+    parser.add_argument('--observe-git-status', action=argparse.BooleanOptionalAction, default=False, help='Include full git status in observe manifests')
+    parser.add_argument('--observe-git-describe', action=argparse.BooleanOptionalAction, default=False, help='Include git describe output in observe manifests')
+    parser.add_argument('--observe-model-sha256', action=argparse.BooleanOptionalAction, default=False, help='Hash model artifacts for observe manifests and summaries')
+    parser.add_argument('--observe-env-reports', action=argparse.BooleanOptionalAction, default=False, help='Record raw env info payloads in observe mode')
     return parser
 
 def process_config(config, parser=None):
@@ -1322,7 +1376,7 @@ def process_config(config, parser=None):
     return args
 
 def main():
-    err = 'Usage: puffer [train, eval, sweep, autotune, profile, export] [env_name] [optional args]. --help for more info'
+    err = 'Usage: puffer [train, eval, sweep, observe, autotune, profile, export] [env_name] [optional args]. --help for more info'
     if len(sys.argv) < 3:
         raise pufferlib.APIUsageError(err)
 
@@ -1330,6 +1384,8 @@ def main():
     env_name = sys.argv.pop(1)
     if mode == 'train':
         train(env_name=env_name)
+    elif mode == 'observe':
+        observe(env_name=env_name)
     elif mode == 'eval':
         eval(env_name=env_name)
     elif mode == 'sweep':
