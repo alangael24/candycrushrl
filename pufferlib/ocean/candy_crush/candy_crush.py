@@ -14,14 +14,14 @@ class CandyCrush(pufferlib.PufferEnv):
         board_size=8,
         num_candies=6,
         max_steps=40,
-        objective_mode=1,
-        score_target=150,
+        goal_vector=None,
         frosting_layers=2,
-        ingredient_target=2,
         ingredient_spawn_rows=2,
-        target_color=3,
-        color_target=30,
-        frosting_target=30,
+        task_distribution_mode=1,
+        task_min_active_goals=1,
+        task_max_active_goals=3,
+        task_min_steps=22,
+        task_max_steps=40,
         reward_per_tile=0.05,
         combo_bonus=0.10,
         invalid_penalty=-0.20,
@@ -32,7 +32,10 @@ class CandyCrush(pufferlib.PufferEnv):
         color_reward=0.35,
         color_tile_scale=0.20,
         color_combo_scale=0.50,
+        progress_reward_scale=1.0,
         success_bonus=3.0,
+        failure_penalty=1.0,
+        efficiency_bonus=0.5,
         jelly_density=0.35,
         frosting_density=0.10,
         level_id=-1,
@@ -47,7 +50,12 @@ class CandyCrush(pufferlib.PufferEnv):
         buf=None,
         seed=0,
     ):
-        obs_size = board_size * board_size * (num_candies * 5 + 8) + board_size * board_size * 4
+        goal_slots = num_candies + 4
+        obs_size = (
+            board_size * board_size * (num_candies * 5 + 4)
+            + (goal_slots * 3 + 2)
+            + board_size * board_size * 4
+        )
         self.single_observation_space = gymnasium.spaces.Box(
             low=0, high=255, shape=(obs_size,), dtype=np.uint8
         )
@@ -59,14 +67,18 @@ class CandyCrush(pufferlib.PufferEnv):
         self.board_size = board_size
         self.num_candies = num_candies
         self.max_steps = max_steps
-        self.objective_mode = objective_mode
-        self.score_target = score_target
+        if goal_vector is not None:
+            goal_vector = list(goal_vector)
+            if len(goal_vector) > goal_slots:
+                raise ValueError(f'goal_vector length must be <= {goal_slots} for num_candies={num_candies}')
+        self.goal_vector = goal_vector
         self.frosting_layers = frosting_layers
-        self.ingredient_target = ingredient_target
         self.ingredient_spawn_rows = ingredient_spawn_rows
-        self.target_color = target_color
-        self.color_target = color_target
-        self.frosting_target = frosting_target
+        self.task_distribution_mode = task_distribution_mode
+        self.task_min_active_goals = task_min_active_goals
+        self.task_max_active_goals = task_max_active_goals
+        self.task_min_steps = task_min_steps
+        self.task_max_steps = task_max_steps
         self.reward_per_tile = reward_per_tile
         self.combo_bonus = combo_bonus
         self.invalid_penalty = invalid_penalty
@@ -77,7 +89,10 @@ class CandyCrush(pufferlib.PufferEnv):
         self.color_reward = color_reward
         self.color_tile_scale = color_tile_scale
         self.color_combo_scale = color_combo_scale
+        self.progress_reward_scale = progress_reward_scale
         self.success_bonus = success_bonus
+        self.failure_penalty = failure_penalty
+        self.efficiency_bonus = efficiency_bonus
         self.jelly_density = jelly_density
         self.frosting_density = frosting_density
         self.level_id = level_id
@@ -87,6 +102,15 @@ class CandyCrush(pufferlib.PufferEnv):
         self.curriculum_min_episodes = curriculum_min_episodes
         self.curriculum_threshold = curriculum_threshold
         self.curriculum_replay_prob = curriculum_replay_prob
+        if (
+            self.goal_vector is None
+            and self.task_distribution_mode == 0
+            and self.level_id < 0
+            and self.curriculum_mode == 0
+        ):
+            raise ValueError(
+                'Provide goal_vector or enable task_distribution_mode/curriculum_mode/set level_id'
+            )
 
         super().__init__(buf)
         self.c_envs = binding.vec_init(
@@ -100,14 +124,14 @@ class CandyCrush(pufferlib.PufferEnv):
             board_size=self.board_size,
             num_candies=self.num_candies,
             max_steps=self.max_steps,
-            objective_mode=self.objective_mode,
-            score_target=self.score_target,
+            goal_vector=self.goal_vector,
             frosting_layers=self.frosting_layers,
-            ingredient_target=self.ingredient_target,
             ingredient_spawn_rows=self.ingredient_spawn_rows,
-            target_color=self.target_color,
-            color_target=self.color_target,
-            frosting_target=self.frosting_target,
+            task_distribution_mode=self.task_distribution_mode,
+            task_min_active_goals=self.task_min_active_goals,
+            task_max_active_goals=self.task_max_active_goals,
+            task_min_steps=self.task_min_steps,
+            task_max_steps=self.task_max_steps,
             reward_per_tile=self.reward_per_tile,
             combo_bonus=self.combo_bonus,
             invalid_penalty=self.invalid_penalty,
@@ -118,7 +142,10 @@ class CandyCrush(pufferlib.PufferEnv):
             color_reward=self.color_reward,
             color_tile_scale=self.color_tile_scale,
             color_combo_scale=self.color_combo_scale,
+            progress_reward_scale=self.progress_reward_scale,
             success_bonus=self.success_bonus,
+            failure_penalty=self.failure_penalty,
+            efficiency_bonus=self.efficiency_bonus,
             jelly_density=self.jelly_density,
             frosting_density=self.frosting_density,
             level_id=self.level_id,

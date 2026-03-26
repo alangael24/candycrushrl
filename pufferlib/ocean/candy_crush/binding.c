@@ -3,18 +3,55 @@
 #define Env CandyCrush
 #include "../env_binding.h"
 
+static int unpack_goal_vector(PyObject* kwargs, const char* key, Env* env) {
+    PyObject* value = PyDict_GetItemString(kwargs, key);
+    const int slots = goal_slot_count(env);
+    clear_goal_vector(env->goal_target);
+    env->has_goal_vector = 0;
+
+    if (value == NULL || value == Py_None) return 0;
+
+    PyObject* seq = PySequence_Fast(value, "goal_vector must be a sequence of ints");
+    if (seq == NULL) return -1;
+
+    Py_ssize_t length = PySequence_Fast_GET_SIZE(seq);
+    if (length < 1 || length > slots) {
+        PyErr_Format(
+            PyExc_ValueError,
+            "goal_vector length must be in [1, %d] for num_candies=%d",
+            slots,
+            env->num_candies
+        );
+        Py_DECREF(seq);
+        return -1;
+    }
+
+    for (Py_ssize_t i = 0; i < length; i++) {
+        PyObject* item = PySequence_Fast_GET_ITEM(seq, i);
+        if (!PyLong_Check(item)) {
+            PyErr_SetString(PyExc_TypeError, "goal_vector items must be ints");
+            Py_DECREF(seq);
+            return -1;
+        }
+        env->goal_target[i] = (int)PyLong_AsLong(item);
+    }
+
+    env->has_goal_vector = 1;
+    Py_DECREF(seq);
+    return 0;
+}
+
 static int my_init(Env* env, PyObject* args, PyObject* kwargs) {
     env->board_size = unpack(kwargs, "board_size");
     env->num_candies = unpack(kwargs, "num_candies");
     env->max_steps = unpack(kwargs, "max_steps");
-    env->objective_mode = unpack(kwargs, "objective_mode");
-    env->score_target = unpack(kwargs, "score_target");
     env->frosting_layers = unpack(kwargs, "frosting_layers");
-    env->ingredient_target = unpack(kwargs, "ingredient_target");
     env->ingredient_spawn_rows = unpack(kwargs, "ingredient_spawn_rows");
-    env->target_color = unpack(kwargs, "target_color");
-    env->color_target = unpack(kwargs, "color_target");
-    env->frosting_target = unpack(kwargs, "frosting_target");
+    env->task_distribution_mode = unpack(kwargs, "task_distribution_mode");
+    env->task_min_active_goals = unpack(kwargs, "task_min_active_goals");
+    env->task_max_active_goals = unpack(kwargs, "task_max_active_goals");
+    env->task_min_steps = unpack(kwargs, "task_min_steps");
+    env->task_max_steps = unpack(kwargs, "task_max_steps");
     env->reward_per_tile = unpack(kwargs, "reward_per_tile");
     env->combo_bonus = unpack(kwargs, "combo_bonus");
     env->invalid_penalty = unpack(kwargs, "invalid_penalty");
@@ -25,7 +62,10 @@ static int my_init(Env* env, PyObject* args, PyObject* kwargs) {
     env->color_reward = unpack(kwargs, "color_reward");
     env->color_tile_scale = unpack(kwargs, "color_tile_scale");
     env->color_combo_scale = unpack(kwargs, "color_combo_scale");
+    env->progress_reward_scale = unpack(kwargs, "progress_reward_scale");
     env->success_bonus = unpack(kwargs, "success_bonus");
+    env->failure_penalty = unpack(kwargs, "failure_penalty");
+    env->efficiency_bonus = unpack(kwargs, "efficiency_bonus");
     env->jelly_density = unpack(kwargs, "jelly_density");
     env->frosting_density = unpack(kwargs, "frosting_density");
     env->level_id = unpack(kwargs, "level_id");
@@ -35,6 +75,7 @@ static int my_init(Env* env, PyObject* args, PyObject* kwargs) {
     env->curriculum_min_episodes = unpack(kwargs, "curriculum_min_episodes");
     env->curriculum_threshold = unpack(kwargs, "curriculum_threshold");
     env->curriculum_replay_prob = unpack(kwargs, "curriculum_replay_prob");
+    if (unpack_goal_vector(kwargs, "goal_vector", env) != 0) return -1;
     init_env(env);
     c_reset(env);
     return 0;

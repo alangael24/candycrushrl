@@ -8,7 +8,8 @@ into the standard PufferLib CLI as `puffer_candy_crush`.
 - Single-agent Candy Crush style puzzle
 - Action space: `board_size * board_size * 4`
 - Observation space: flattened planes for candies/specials plus jelly,
-  frosting, ingredients, goal progress, move budget, and legal-action mask
+  frosting, ingredients, a goal vector, a remaining-goal vector, a normalized
+  remaining-goal vector, move budget, and legal-action mask
 
 ## Mechanics
 
@@ -17,8 +18,11 @@ into the standard PufferLib CLI as `puffer_candy_crush`.
 - T/L intersections create wrapped candies
 - 2x2 squares create fish
 - Direct striped, wrapped, color bomb, and fish combos resolve in C
-- Level goals: `score`, `clear all jelly`, `drop all ingredients`,
-  `collect a target color`, or `clear blocker tiles`
+- Goal specification is vector-valued: the first `num_candies` slots track
+  candy colors, followed by `jelly`, `frosting`, `ingredient`, and optional
+  `score`
+- Multiple goal slots can be non-zero at once, so compound tasks such as
+  "collect blue and clear frosting" are representable directly
 - Blockers: layered frosting plus jelly underlay tiles
 - Ingredients: non-swappable pieces that fall with gravity and exit from the bottom row
 - Legal action masking: the observation includes a per-action legality mask and
@@ -26,11 +30,13 @@ into the standard PufferLib CLI as `puffer_candy_crush`.
 - Campaign levels: the early level bank starts with "collect blue candies"
   stages, then transitions into blocker-clearing stages that unlock closed-off
   board regions, with pre-placed starter specials on selected levels
-- Color-goal shaping: `GOAL_COLOR` pays an extra `color_reward` for each target
-  candy cleared and down-weights generic clear/combo rewards so early levels
-  train the target-color skill instead of raw score farming
+- Goal-conditioned reward shaping: dense reward comes from reduction of the
+  normalized remaining-goal vector, with terminal win/loss terms and an
+  efficiency bonus for winning early
 - Adaptive curriculum: unlocks harder authored levels when the frontier win
   rate crosses a threshold and still replays earlier levels occasionally
+- Task distribution mode: when enabled, resets sample compound goals and move
+  budgets directly instead of relying on authored level profiles
 
 ## CLI
 
@@ -47,10 +53,14 @@ Useful curriculum knobs in `candy_crush.ini` or CLI env overrides:
 - `curriculum_mode = 1` enables adaptive progression from easy to hard
 - `curriculum_min_episodes`, `curriculum_threshold`, `curriculum_replay_prob`
   control unlock speed and replay of earlier levels
-- `target_color`, `color_target`, and `frosting_target` define the explicit
-  target when you disable curriculum and run a fixed custom level profile
-- `color_reward`, `color_tile_scale`, and `color_combo_scale` tune how strongly
-  collect-color levels prioritize the requested candy over generic clears
+- `goal_vector` defines explicit custom targets when you disable curriculum and
+  task distribution;
+  for `num_candies=6`, a vector can be `[red, green, blue, yellow, purple,
+  teal, jelly, frosting, ingredient, score]`
+- `task_distribution_mode`, `task_min_active_goals`, `task_max_active_goals`,
+  `task_min_steps`, and `task_max_steps` control sampling from `p(tau)`
+- `progress_reward_scale`, `success_bonus`, `failure_penalty`, and
+  `efficiency_bonus` control the goal-aligned reward
 
 ## Notes
 

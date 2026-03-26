@@ -16,10 +16,11 @@
 #define COLOR_MASK 0x0F
 #define TYPE_SHIFT 4
 #define SPECIAL_LAYERS 5
+#define GOAL_EXTRA_SLOTS 4
+#define GOAL_AUTO -1
 
 typedef enum { SPECIAL_NONE, SPECIAL_STRIPED_H, SPECIAL_STRIPED_V, SPECIAL_WRAPPED, SPECIAL_COLOR_BOMB, SPECIAL_FISH, SPECIAL_INGREDIENT } SpecialType;
 typedef enum { EFFECT_ROW, EFFECT_COL, EFFECT_BLAST3, EFFECT_BLAST5, EFFECT_CROSS3, EFFECT_COLOR, EFFECT_BOARD, EFFECT_FISH, EFFECT_FISH_H, EFFECT_FISH_V, EFFECT_FISH_W } EffectKind;
-typedef enum { GOAL_SCORE, GOAL_JELLY, GOAL_INGREDIENT, GOAL_COLOR, GOAL_FROSTING } GoalMode;
 
 typedef struct {
     float score, episode_return, episode_length, total_cleared, invalid_swaps;
@@ -41,7 +42,10 @@ typedef struct {
     int components;
 } MatchAnalysis;
 
-typedef struct { int candies, jelly, frosting, ingredients, color; } ClearStats;
+typedef struct {
+    int candies;
+    int events[MAX_CANDIES + GOAL_EXTRA_SLOTS];
+} ClearStats;
 
 typedef struct {
     Log log;
@@ -53,14 +57,16 @@ typedef struct {
     int board_size;
     int num_candies;
     int max_steps;
-    int objective_mode;
-    int score_target;
     int frosting_layers;
-    int ingredient_target;
     int ingredient_spawn_rows;
-    int target_color;
-    int color_target;
-    int frosting_target;
+    int task_distribution_mode;
+    int task_min_active_goals;
+    int task_max_active_goals;
+    int task_min_steps;
+    int task_max_steps;
+    int goal_target[MAX_CANDIES + GOAL_EXTRA_SLOTS];
+    int goal_remaining[MAX_CANDIES + GOAL_EXTRA_SLOTS];
+    int has_goal_vector;
 
     float reward_per_tile;
     float combo_bonus;
@@ -72,19 +78,17 @@ typedef struct {
     float color_reward;
     float color_tile_scale;
     float color_combo_scale;
+    float progress_reward_scale;
     float success_bonus;
+    float failure_penalty;
+    float efficiency_bonus;
     float jelly_density;
     float frosting_density;
 
     int base_max_steps;
-    int base_objective_mode;
-    int base_score_target;
     int base_frosting_layers;
-    int base_ingredient_target;
     int base_ingredient_spawn_rows;
-    int base_target_color;
-    int base_color_target;
-    int base_frosting_target;
+    int base_goal_target[MAX_CANDIES + GOAL_EXTRA_SLOTS];
     float base_jelly_density;
     float base_frosting_density;
 
@@ -105,7 +109,7 @@ typedef struct {
     int total_cascades, max_combo, reshuffles;
     int jelly_total, jelly_remaining, jelly_cleared, frosting_cleared;
     int ingredient_total, ingredient_remaining, ingredients_dropped, level_won;
-    int color_collected;
+    int color_collected[MAX_CANDIES];
     int starter_striped, starter_wrapped, starter_color_bomb, starter_fish;
     float episode_return;
 
@@ -141,17 +145,20 @@ static inline int match_color(unsigned char cell) {
     return (!is_empty(cell) && special != SPECIAL_COLOR_BOMB && special != SPECIAL_INGREDIENT) ? cell_color(cell) : 0;
 }
 static inline unsigned char sample_candy(CandyCrush* env) { return make_cell(1 + rand() % env->num_candies, SPECIAL_NONE); }
-static inline int obs_layers(CandyCrush* env) { return SPECIAL_LAYERS * env->num_candies + 8; }
+static inline int goal_slot_count(CandyCrush* env) { return env->num_candies + GOAL_EXTRA_SLOTS; }
+static inline int goal_jelly_slot(CandyCrush* env) { return env->num_candies; }
+static inline int goal_frosting_slot(CandyCrush* env) { return env->num_candies + 1; }
+static inline int goal_ingredient_slot(CandyCrush* env) { return env->num_candies + 2; }
+static inline int goal_score_slot(CandyCrush* env) { return env->num_candies + 3; }
+static inline int obs_layers(CandyCrush* env) { return SPECIAL_LAYERS * env->num_candies + 4; }
+static inline int scalar_feature_count(CandyCrush* env) { return goal_slot_count(env) * 3 + 2; }
+static inline int board_feature_size(CandyCrush* env) { return env->board_size * env->board_size * obs_layers(env); }
 static inline int action_count(CandyCrush* env) { return env->board_size * env->board_size * 4; }
-static inline int obs_feature_size(CandyCrush* env) { return env->board_size * env->board_size * obs_layers(env); }
+static inline int obs_feature_size(CandyCrush* env) { return board_feature_size(env) + scalar_feature_count(env); }
 static inline int color_bomb_layer(CandyCrush* env) { return SPECIAL_LAYERS * env->num_candies; }
 static inline int jelly_layer(CandyCrush* env) { return SPECIAL_LAYERS * env->num_candies + 1; }
 static inline int frosting_layer(CandyCrush* env) { return SPECIAL_LAYERS * env->num_candies + 2; }
 static inline int ingredient_layer(CandyCrush* env) { return SPECIAL_LAYERS * env->num_candies + 3; }
-static inline int goal_layer(CandyCrush* env) { return SPECIAL_LAYERS * env->num_candies + 4; }
-static inline int steps_layer(CandyCrush* env) { return SPECIAL_LAYERS * env->num_candies + 5; }
-static inline int objective_layer(CandyCrush* env) { return SPECIAL_LAYERS * env->num_candies + 6; }
-static inline int target_color_layer(CandyCrush* env) { return SPECIAL_LAYERS * env->num_candies + 7; }
 static inline bool is_legal_swap(CandyCrush* env, int row, int col, int nrow, int ncol);
 static inline int swap_match_color(CandyCrush* env, int row, int col, int srow, int scol, unsigned char scell, int trow, int tcol, unsigned char tcell);
 static inline float lerp_float(float start, float end, float t) { return start + (end - start) * t; }
@@ -163,28 +170,126 @@ static inline float clamp01(float value) {
     return value;
 }
 
+static inline int rand_int_range(int low, int high) {
+    if (high < low) {
+        const int tmp = low;
+        low = high;
+        high = tmp;
+    }
+    return low + rand() % max_int(1, high - low + 1);
+}
+
+static inline float rand_float_range(float low, float high) {
+    if (high < low) {
+        const float tmp = low;
+        low = high;
+        high = tmp;
+    }
+    return low + ((float)rand() / RAND_MAX) * (high - low);
+}
+
+static inline void clear_goal_vector(int goals[MAX_CANDIES + GOAL_EXTRA_SLOTS]) {
+    memset(goals, 0, sizeof(int) * (MAX_CANDIES + GOAL_EXTRA_SLOTS));
+}
+
+static inline void copy_goal_vector(
+    int dst[MAX_CANDIES + GOAL_EXTRA_SLOTS],
+    const int src[MAX_CANDIES + GOAL_EXTRA_SLOTS]
+) {
+    memcpy(dst, src, sizeof(int) * (MAX_CANDIES + GOAL_EXTRA_SLOTS));
+}
+
+static inline void add_goal_event(CandyCrush* env, ClearStats* stats, int slot, int amount) {
+    if (slot < 0 || slot >= goal_slot_count(env) || amount <= 0) return;
+    stats->events[slot] += amount;
+}
+
+static inline void merge_clear_stats(CandyCrush* env, ClearStats* dst, const ClearStats* src) {
+    dst->candies += src->candies;
+    for (int i = 0; i < goal_slot_count(env); i++) dst->events[i] += src->events[i];
+}
+
+static inline void reset_goal_remaining(CandyCrush* env) {
+    clear_goal_vector(env->goal_remaining);
+    for (int i = 0; i < goal_slot_count(env); i++) env->goal_remaining[i] = max_int(0, env->goal_target[i]);
+}
+
+static inline void apply_goal_events(CandyCrush* env, const ClearStats* stats) {
+    for (int i = 0; i < goal_slot_count(env); i++) {
+        env->goal_remaining[i] = max_int(0, env->goal_remaining[i] - max_int(0, stats->events[i]));
+    }
+}
+
+static inline int total_color_collected(CandyCrush* env) {
+    int total = 0;
+    for (int i = 0; i < env->num_candies; i++) total += env->color_collected[i];
+    return total;
+}
+
+static inline bool has_score_goal(CandyCrush* env) {
+    return env->goal_target[goal_score_slot(env)] > 0;
+}
+
+static inline bool has_color_goals(CandyCrush* env) {
+    for (int i = 0; i < env->num_candies; i++) if (env->goal_target[i] > 0) return true;
+    return false;
+}
+
+static inline bool is_score_only_goal(CandyCrush* env) {
+    const int score_slot = goal_score_slot(env);
+    if (env->goal_target[score_slot] <= 0) return false;
+    for (int i = 0; i < goal_slot_count(env); i++) {
+        if (i == score_slot) continue;
+        if (env->goal_target[i] > 0) return false;
+    }
+    return true;
+}
+
+static inline bool has_noncolor_goals(CandyCrush* env) {
+    return env->goal_target[goal_jelly_slot(env)] > 0
+        || env->goal_target[goal_frosting_slot(env)] > 0
+        || env->goal_target[goal_ingredient_slot(env)] > 0
+        || env->goal_target[goal_score_slot(env)] > 0;
+}
+
+static inline int total_frosting_layers(CandyCrush* env) {
+    int total = 0;
+    for (int row = 0; row < env->board_size; row++) {
+        for (int col = 0; col < env->board_size; col++) total += env->frosting[row][col];
+    }
+    return total;
+}
+
+static inline float goal_remaining_mass(CandyCrush* env) {
+    float remaining = 0.0f;
+    for (int i = 0; i < goal_slot_count(env); i++) {
+        const int target = max_int(0, env->goal_target[i]);
+        if (target <= 0) continue;
+        remaining += clamp01((float)env->goal_remaining[i] / max_int(1, target));
+    }
+    return remaining;
+}
+
 static inline float goal_remaining_ratio(CandyCrush* env) {
-    if (env->objective_mode == GOAL_SCORE) {
-        return env->score_target > 0 ? clamp01((float)max_int(0, env->score_target - env->score) / env->score_target) : 0.0f;
+    float remaining = 0.0f;
+    int active = 0;
+    for (int i = 0; i < goal_slot_count(env); i++) {
+        const int target = max_int(0, env->goal_target[i]);
+        if (target <= 0) continue;
+        active++;
+        remaining += clamp01((float)env->goal_remaining[i] / max_int(1, target));
     }
-    if (env->objective_mode == GOAL_JELLY) {
-        return env->jelly_total > 0 ? clamp01((float)env->jelly_remaining / env->jelly_total) : 0.0f;
-    }
-    if (env->objective_mode == GOAL_INGREDIENT) {
-        return env->ingredient_total > 0 ? clamp01((float)env->ingredient_remaining / env->ingredient_total) : 0.0f;
-    }
-    if (env->objective_mode == GOAL_COLOR) {
-        return env->color_target > 0 ? clamp01((float)max_int(0, env->color_target - env->color_collected) / env->color_target) : 0.0f;
-    }
-    return env->frosting_target > 0 ? clamp01((float)max_int(0, env->frosting_target - env->frosting_cleared) / env->frosting_target) : 0.0f;
+    return active > 0 ? remaining / active : 0.0f;
 }
 
 static inline bool goal_complete(CandyCrush* env) {
-    if (env->objective_mode == GOAL_SCORE) return env->score >= env->score_target;
-    if (env->objective_mode == GOAL_JELLY) return env->jelly_remaining <= 0;
-    if (env->objective_mode == GOAL_INGREDIENT) return env->ingredient_remaining <= 0;
-    if (env->objective_mode == GOAL_COLOR) return env->color_collected >= env->color_target;
-    return env->frosting_cleared >= env->frosting_target;
+    int active = 0;
+    for (int i = 0; i < goal_slot_count(env); i++) {
+        if (env->goal_target[i] <= 0) continue;
+        active++;
+        if (env->goal_remaining[i] > 0) return false;
+    }
+    return active > 0;
 }
 
 static inline float curriculum_win_rate(CandyCrush* env) {
@@ -192,15 +297,11 @@ static inline float curriculum_win_rate(CandyCrush* env) {
 }
 
 static inline float objective_tile_reward(CandyCrush* env) {
-    return env->objective_mode == GOAL_COLOR
-        ? env->reward_per_tile * env->color_tile_scale
-        : env->reward_per_tile;
+    return is_score_only_goal(env) ? env->reward_per_tile : 0.0f;
 }
 
 static inline float objective_combo_bonus(CandyCrush* env) {
-    return env->objective_mode == GOAL_COLOR
-        ? env->combo_bonus * env->color_combo_scale
-        : env->combo_bonus;
+    return is_score_only_goal(env) ? env->combo_bonus : 0.0f;
 }
 
 static inline float level_progress(CandyCrush* env, int level) {
@@ -212,14 +313,9 @@ static inline float level_progress(CandyCrush* env, int level) {
 
 static void restore_base_profile(CandyCrush* env) {
     env->max_steps = env->base_max_steps;
-    env->objective_mode = env->base_objective_mode;
-    env->score_target = env->base_score_target;
     env->frosting_layers = env->base_frosting_layers;
-    env->ingredient_target = env->base_ingredient_target;
     env->ingredient_spawn_rows = env->base_ingredient_spawn_rows;
-    env->target_color = env->base_target_color;
-    env->color_target = env->base_color_target;
-    env->frosting_target = env->base_frosting_target;
+    copy_goal_vector(env->goal_target, env->base_goal_target);
     env->jelly_density = env->base_jelly_density;
     env->frosting_density = env->base_frosting_density;
     env->starter_striped = 0;
@@ -230,11 +326,10 @@ static void restore_base_profile(CandyCrush* env) {
 
 static void apply_level_profile(CandyCrush* env, int level) {
     restore_base_profile(env);
+    clear_goal_vector(env->goal_target);
     switch (level) {
         case 0:
-            env->objective_mode = GOAL_COLOR;
-            env->target_color = 3;
-            env->color_target = 16;
+            env->goal_target[2] = 16;
             env->max_steps = 26;
             env->starter_striped = 1;
             env->starter_wrapped = 1;
@@ -242,9 +337,7 @@ static void apply_level_profile(CandyCrush* env, int level) {
             env->frosting_density = 0.0f;
             break;
         case 1:
-            env->objective_mode = GOAL_COLOR;
-            env->target_color = 3;
-            env->color_target = 24;
+            env->goal_target[2] = 24;
             env->max_steps = 30;
             env->starter_striped = 1;
             env->starter_wrapped = 1;
@@ -252,9 +345,7 @@ static void apply_level_profile(CandyCrush* env, int level) {
             env->frosting_density = 0.0f;
             break;
         case 2:
-            env->objective_mode = GOAL_COLOR;
-            env->target_color = 3;
-            env->color_target = 30;
+            env->goal_target[2] = 30;
             env->max_steps = 32;
             env->starter_striped = 2;
             env->starter_wrapped = 1;
@@ -262,8 +353,7 @@ static void apply_level_profile(CandyCrush* env, int level) {
             env->frosting_density = 0.0f;
             break;
         case 3:
-            env->objective_mode = GOAL_FROSTING;
-            env->frosting_target = 12;
+            env->goal_target[goal_frosting_slot(env)] = 12;
             env->max_steps = 24;
             env->frosting_layers = 1;
             env->starter_striped = 1;
@@ -271,8 +361,7 @@ static void apply_level_profile(CandyCrush* env, int level) {
             env->frosting_density = 0.0f;
             break;
         case 4:
-            env->objective_mode = GOAL_FROSTING;
-            env->frosting_target = 20;
+            env->goal_target[goal_frosting_slot(env)] = 20;
             env->max_steps = 28;
             env->frosting_layers = 1;
             env->starter_wrapped = 1;
@@ -280,8 +369,7 @@ static void apply_level_profile(CandyCrush* env, int level) {
             env->frosting_density = 0.0f;
             break;
         case 5:
-            env->objective_mode = GOAL_FROSTING;
-            env->frosting_target = 30;
+            env->goal_target[goal_frosting_slot(env)] = 30;
             env->max_steps = 32;
             env->frosting_layers = 2;
             env->starter_striped = 2;
@@ -290,7 +378,7 @@ static void apply_level_profile(CandyCrush* env, int level) {
             env->frosting_density = 0.0f;
             break;
         case 6:
-            env->objective_mode = GOAL_JELLY;
+            env->goal_target[goal_jelly_slot(env)] = GOAL_AUTO;
             env->max_steps = 28;
             env->jelly_density = 0.18f;
             env->frosting_density = 0.05f;
@@ -298,7 +386,7 @@ static void apply_level_profile(CandyCrush* env, int level) {
             env->starter_striped = 1;
             break;
         case 7:
-            env->objective_mode = GOAL_JELLY;
+            env->goal_target[goal_jelly_slot(env)] = GOAL_AUTO;
             env->max_steps = 30;
             env->jelly_density = 0.28f;
             env->frosting_density = 0.08f;
@@ -306,7 +394,7 @@ static void apply_level_profile(CandyCrush* env, int level) {
             env->starter_wrapped = 1;
             break;
         case 8:
-            env->objective_mode = GOAL_JELLY;
+            env->goal_target[goal_jelly_slot(env)] = GOAL_AUTO;
             env->max_steps = 32;
             env->jelly_density = 0.36f;
             env->frosting_density = 0.10f;
@@ -315,8 +403,7 @@ static void apply_level_profile(CandyCrush* env, int level) {
             env->starter_wrapped = 1;
             break;
         case 9:
-            env->objective_mode = GOAL_INGREDIENT;
-            env->ingredient_target = 1;
+            env->goal_target[goal_ingredient_slot(env)] = 1;
             env->ingredient_spawn_rows = 1;
             env->max_steps = 28;
             env->frosting_density = 0.06f;
@@ -324,8 +411,7 @@ static void apply_level_profile(CandyCrush* env, int level) {
             env->starter_striped = 1;
             break;
         case 10:
-            env->objective_mode = GOAL_INGREDIENT;
-            env->ingredient_target = 2;
+            env->goal_target[goal_ingredient_slot(env)] = 2;
             env->ingredient_spawn_rows = 2;
             env->max_steps = 32;
             env->frosting_density = 0.10f;
@@ -334,7 +420,7 @@ static void apply_level_profile(CandyCrush* env, int level) {
             break;
         case 11:
         default:
-            env->objective_mode = GOAL_JELLY;
+            env->goal_target[goal_jelly_slot(env)] = GOAL_AUTO;
             env->max_steps = 34;
             env->jelly_density = 0.42f;
             env->frosting_density = 0.12f;
@@ -346,7 +432,76 @@ static void apply_level_profile(CandyCrush* env, int level) {
     }
 }
 
+static void sample_task_distribution(CandyCrush* env) {
+    int families[5] = {0, 1, 2, 3, 4};
+    const int jelly_slot = goal_jelly_slot(env);
+    const int frosting_slot = goal_frosting_slot(env);
+    const int ingredient_slot = goal_ingredient_slot(env);
+    const int score_slot = goal_score_slot(env);
+    const int max_families = 5;
+    int active_goals;
+
+    restore_base_profile(env);
+    clear_goal_vector(env->goal_target);
+    env->active_level = -1;
+
+    env->task_min_steps = max_int(1, env->task_min_steps);
+    env->task_max_steps = max_int(env->task_min_steps, env->task_max_steps);
+    env->max_steps = rand_int_range(env->task_min_steps, env->task_max_steps);
+
+    env->jelly_density = 0.0f;
+    env->frosting_density = rand_float_range(0.0f, 0.12f);
+    env->frosting_layers = rand_int_range(1, max_int(1, env->base_frosting_layers));
+    env->ingredient_spawn_rows = rand_int_range(1, min_int(2, env->board_size));
+    env->starter_striped = rand_int_range(0, 1);
+    env->starter_wrapped = rand_int_range(0, 1);
+    env->starter_color_bomb = rand_int_range(0, 4) == 0;
+    env->starter_fish = rand_int_range(0, 3) == 0;
+
+    env->task_min_active_goals = clamp_int(env->task_min_active_goals, 1, max_families);
+    env->task_max_active_goals = clamp_int(env->task_max_active_goals, env->task_min_active_goals, max_families);
+    active_goals = rand_int_range(env->task_min_active_goals, env->task_max_active_goals);
+
+    for (int i = 0; i < max_families; i++) {
+        const int pick = rand_int_range(i, max_families - 1);
+        const int tmp = families[i];
+        families[i] = families[pick];
+        families[pick] = tmp;
+    }
+
+    for (int idx = 0; idx < active_goals; idx++) {
+        switch (families[idx]) {
+            case 0: {
+                const int color_slot = rand_int_range(0, env->num_candies - 1);
+                const int color_min = max_int(6, env->max_steps / 3);
+                const int color_max = max_int(color_min, env->max_steps);
+                env->goal_target[color_slot] = rand_int_range(color_min, color_max);
+                break;
+            }
+            case 1:
+                env->goal_target[jelly_slot] = GOAL_AUTO;
+                env->jelly_density = rand_float_range(0.12f, 0.42f);
+                break;
+            case 2:
+                env->goal_target[frosting_slot] = GOAL_AUTO;
+                env->frosting_density = rand_float_range(0.08f, 0.20f);
+                env->frosting_layers = rand_int_range(1, 2);
+                break;
+            case 3:
+                env->goal_target[ingredient_slot] = rand_int_range(1, min_int(2, env->board_size));
+                env->ingredient_spawn_rows = rand_int_range(1, min_int(2, env->board_size));
+                break;
+            case 4:
+                env->goal_target[score_slot] = rand_int_range(env->max_steps * 2, env->max_steps * 5);
+                break;
+        }
+    }
+
+    env->max_steps += 4 * max_int(0, active_goals - 1);
+}
+
 static int select_active_level(CandyCrush* env) {
+    if (env->task_distribution_mode != 0 && env->level_id < 0) return -1;
     if (env->level_id >= 0) return clamp_int(env->level_id, env->curriculum_start_level, env->curriculum_max_level);
     if (env->curriculum_mode == 0) return -1;
     if (env->unlocked_level > env->curriculum_start_level
@@ -391,8 +546,8 @@ static inline int obs_layer(CandyCrush* env, unsigned char cell) {
 
 static void update_observations(CandyCrush* env) {
     const int cells = env->board_size * env->board_size;
-    const int layers = obs_layers(env);
-    const int feature_size = cells * layers;
+    const int board_size = board_feature_size(env);
+    const int feature_size = obs_feature_size(env);
     memset(env->observations, 0, feature_size + action_count(env));
     for (int row = 0; row < env->board_size; row++) for (int col = 0; col < env->board_size; col++) {
         const int idx = row * env->board_size + col;
@@ -402,18 +557,20 @@ static void update_observations(CandyCrush* env) {
         if (env->frosting[row][col] > 0) env->observations[frosting_layer(env) * cells + idx] = (unsigned char)(255 * env->frosting[row][col] / max_int(1, env->frosting_layers));
     }
     {
-        const unsigned char goal = (unsigned char)(255 * goal_remaining_ratio(env));
+        unsigned char* meta = env->observations + board_size;
+        const int slots = goal_slot_count(env);
         const unsigned char steps = (unsigned char)(255 * max_int(0, env->max_steps - env->steps) / max_int(1, env->max_steps));
-        const unsigned char objective = (unsigned char)(255 * env->objective_mode / GOAL_FROSTING);
-        const unsigned char target_color = env->objective_mode == GOAL_COLOR
-            ? (unsigned char)(255 * env->target_color / max_int(1, env->num_candies))
-            : 0;
-        for (int idx = 0; idx < cells; idx++) {
-            env->observations[goal_layer(env) * cells + idx] = goal;
-            env->observations[steps_layer(env) * cells + idx] = steps;
-            env->observations[objective_layer(env) * cells + idx] = objective;
-            env->observations[target_color_layer(env) * cells + idx] = target_color;
+        const unsigned char goal = (unsigned char)(255 * goal_remaining_ratio(env));
+        for (int i = 0; i < slots; i++) {
+            const int target = max_int(0, env->goal_target[i]);
+            meta[i] = (unsigned char)clamp_int(max_int(0, env->goal_target[i]), 0, 255);
+            meta[slots + i] = (unsigned char)clamp_int(env->goal_remaining[i], 0, 255);
+            meta[slots * 2 + i] = (unsigned char)(
+                255.0f * clamp01((float)env->goal_remaining[i] / max_int(1, target))
+            );
         }
+        meta[slots * 3] = steps;
+        meta[slots * 3 + 1] = goal;
     }
     {
         unsigned char* action_mask = env->observations + feature_size;
@@ -624,12 +781,23 @@ static ClearStats apply_clear(CandyCrush* env, bool clear[MAX_BOARD][MAX_BOARD],
     ClearStats stats = {0};
     for (int row = 0; row < env->board_size; row++) for (int col = 0; col < env->board_size; col++) {
         if (!clear[row][col]) continue;
-        if (env->frosting[row][col] > 0) { env->frosting[row][col]--; stats.frosting++; continue; }
+        if (env->frosting[row][col] > 0) {
+            env->frosting[row][col]--;
+            add_goal_event(env, &stats, goal_frosting_slot(env), 1);
+            continue;
+        }
         if (is_empty(env->board[row][col])) continue;
-        if (env->objective_mode == GOAL_COLOR && match_color(env->board[row][col]) == env->target_color) stats.color++;
+        {
+            const int color = match_color(env->board[row][col]);
+            if (color > 0 && color <= env->num_candies) add_goal_event(env, &stats, color - 1, 1);
+        }
         env->board[row][col] = 0;
         stats.candies++;
-        if (env->jelly[row][col] > 0) { env->jelly[row][col] = 0; env->jelly_remaining--; stats.jelly++; }
+        if (env->jelly[row][col] > 0) {
+            env->jelly[row][col] = 0;
+            env->jelly_remaining--;
+            add_goal_event(env, &stats, goal_jelly_slot(env), 1);
+        }
     }
     for (int row = 0; row < env->board_size; row++) for (int col = 0; col < env->board_size; col++) if (create[row][col] != 0) env->board[row][col] = create[row][col];
     return stats;
@@ -642,7 +810,6 @@ static int drop_ingredients(CandyCrush* env) {
         if (env->frosting[bottom][col] > 0 || !is_ingredient(env->board[bottom][col])) continue;
         env->board[bottom][col] = 0;
         env->ingredient_remaining--;
-        env->ingredients_dropped++;
         dropped++;
     }
     return dropped;
@@ -673,7 +840,7 @@ static void refill_board(CandyCrush* env) {
     for (int col = 0; col < env->board_size; col++) for (int row = 0; row < env->board_size; row++) if (env->frosting[row][col] == 0 && is_empty(env->board[row][col])) env->board[row][col] = sample_candy(env);
 }
 
-static float resolve_board(CandyCrush* env, EffectQueue* seed, bool prefer, int pref_row, int pref_col, int move_dir) {
+static float resolve_board(CandyCrush* env, EffectQueue* seed, bool prefer, int pref_row, int pref_col, int move_dir, ClearStats* turn_stats) {
     EffectQueue cur = {0}, post = {0};
     float reward = 0.0f;
     const float tile_reward = objective_tile_reward(env);
@@ -704,21 +871,22 @@ static float resolve_board(CandyCrush* env, EffectQueue* seed, bool prefer, int 
             ClearStats stats = apply_clear(env, clear, create);
             int dropped = 0;
             env->score += stats.candies;
+            add_goal_event(env, &stats, goal_score_slot(env), stats.candies);
             env->total_cleared += stats.candies;
-            env->jelly_cleared += stats.jelly;
-            env->frosting_cleared += stats.frosting;
-            env->color_collected += stats.color;
+            env->jelly_cleared += stats.events[goal_jelly_slot(env)];
+            env->frosting_cleared += stats.events[goal_frosting_slot(env)];
+            for (int i = 0; i < env->num_candies; i++) {
+                env->color_collected[i] += stats.events[i];
+            }
             apply_gravity(env);
             while ((dropped = drop_ingredients(env)) > 0) {
-                stats.ingredients += dropped;
+                add_goal_event(env, &stats, goal_ingredient_slot(env), dropped);
                 apply_gravity(env);
             }
-            reward += stats.candies * tile_reward
-                + stats.jelly * env->jelly_reward
-                + stats.frosting * env->frosting_reward
-                + stats.ingredients * env->ingredient_reward
-                + stats.color * env->color_reward;
+            env->ingredients_dropped += stats.events[goal_ingredient_slot(env)];
+            reward += stats.candies * tile_reward;
             if (combo > 1) reward += (combo - 1) * combo_reward;
+            if (turn_stats != NULL) merge_clear_stats(env, turn_stats, &stats);
             refill_board(env);
         }
         if (post.count > 0) { cur = post; post.count = 0; } else cur.count = 0;
@@ -742,14 +910,14 @@ static inline void swap_cells(CandyCrush* env, int row, int col, int nrow, int n
     env->board[nrow][ncol] = tmp;
 }
 
-static float resolve_special_swap(CandyCrush* env, int row, int col, int nrow, int ncol, unsigned char first, unsigned char second) {
+static float resolve_special_swap(CandyCrush* env, int row, int col, int nrow, int ncol, unsigned char first, unsigned char second, ClearStats* turn_stats) {
     EffectQueue q = {0};
     const SpecialType sa = cell_special(first), sb = cell_special(second);
     const int other_row = row, other_col = col, moved_row = nrow, moved_col = ncol;
     if (sa == SPECIAL_COLOR_BOMB && sb == SPECIAL_COLOR_BOMB) {
         env->board[other_row][other_col] = 0; env->board[moved_row][moved_col] = 0;
         push_effect(&q, EFFECT_BOARD, moved_row, moved_col, 0, 0);
-        return resolve_board(env, &q, false, 0, 0, 0);
+        return resolve_board(env, &q, false, 0, 0, 0, turn_stats);
     }
     if (sa == SPECIAL_COLOR_BOMB || sb == SPECIAL_COLOR_BOMB) {
         const unsigned char other = sa == SPECIAL_COLOR_BOMB ? second : first;
@@ -774,7 +942,7 @@ static float resolve_special_swap(CandyCrush* env, int row, int col, int nrow, i
                 push_effect(&q, EFFECT_FISH, r, c, 0, 1);
             }
         } else push_effect(&q, EFFECT_COLOR, moved_row, moved_col, color, 0);
-        return resolve_board(env, &q, false, 0, 0, 0);
+        return resolve_board(env, &q, false, 0, 0, 0, turn_stats);
     }
     env->board[other_row][other_col] = 0; env->board[moved_row][moved_col] = 0;
     if ((sa == SPECIAL_WRAPPED && sb == SPECIAL_WRAPPED) || (sa == SPECIAL_WRAPPED && sb == SPECIAL_FISH) || (sa == SPECIAL_FISH && sb == SPECIAL_WRAPPED)) {
@@ -789,7 +957,7 @@ static float resolve_special_swap(CandyCrush* env, int row, int col, int nrow, i
         const SpecialType stripe = sa == SPECIAL_FISH ? sb : sa;
         push_effect(&q, stripe == SPECIAL_STRIPED_H ? EFFECT_FISH_H : EFFECT_FISH_V, moved_row, moved_col, 0, 1);
     } else push_effect(&q, EFFECT_FISH, moved_row, moved_col, 0, 3);
-    return resolve_board(env, &q, false, 0, 0, 0);
+    return resolve_board(env, &q, false, 0, 0, 0, turn_stats);
 }
 
 static inline bool line_match_at(CandyCrush* env, int row, int col) {
@@ -903,9 +1071,10 @@ static inline bool creates_start_pattern(CandyCrush* env, int row, int col, unsi
 static void place_ingredients(CandyCrush* env) {
     int rows[MAX_COMPONENTS], cols[MAX_COMPONENTS], count = 0;
     const int spawn_rows = min_int(env->board_size, max_int(1, env->ingredient_spawn_rows));
+    const int requested = env->goal_target[goal_ingredient_slot(env)];
     env->ingredient_total = 0;
     env->ingredient_remaining = 0;
-    if (env->objective_mode != GOAL_INGREDIENT || env->ingredient_target <= 0) return;
+    if (requested == 0) return;
     for (int row = 0; row < spawn_rows; row++) for (int col = 0; col < env->board_size; col++) {
         if (env->frosting[row][col] > 0) continue;
         rows[count] = row;
@@ -921,7 +1090,7 @@ static void place_ingredients(CandyCrush* env) {
         }
     }
     {
-        const int target = min_int(env->ingredient_target, count);
+        const int target = requested < 0 ? count : min_int(requested, count);
         for (int i = 0; i < target; i++) {
             const int pick = i + rand() % (count - i);
             const int row = rows[pick], col = cols[pick];
@@ -1003,23 +1172,35 @@ static void randomize_layout(CandyCrush* env) {
     env->ingredient_remaining = 0;
     if (env->active_level >= 0) {
         build_authored_layout(env);
-        if (env->objective_mode == GOAL_JELLY && env->jelly_total == 0) add_jelly_rect(env, 2, 2, 2, 2);
+        if (env->goal_target[goal_jelly_slot(env)] != 0 && env->jelly_total == 0) add_jelly_rect(env, 2, 2, 2, 2);
         return;
     }
     for (int row = 0; row < env->board_size; row++) for (int col = 0; col < env->board_size; col++) {
-        if (env->objective_mode == GOAL_JELLY && ((float)rand() / RAND_MAX) < env->jelly_density) {
+        if (env->goal_target[goal_jelly_slot(env)] != 0 && ((float)rand() / RAND_MAX) < env->jelly_density) {
             env->jelly[row][col] = 1;
             env->jelly_total++;
             env->jelly_remaining++;
         }
         if (((float)rand() / RAND_MAX) < env->frosting_density) env->frosting[row][col] = 1 + rand() % max_int(1, env->frosting_layers);
     }
-    if (env->objective_mode == GOAL_JELLY && env->jelly_total == 0) {
+    if (env->goal_target[goal_jelly_slot(env)] != 0 && env->jelly_total == 0) {
         const int row = rand() % env->board_size;
         const int col = rand() % env->board_size;
         env->jelly[row][col] = 1;
         env->jelly_total = env->jelly_remaining = 1;
     }
+    if (env->goal_target[goal_frosting_slot(env)] != 0 && total_frosting_layers(env) == 0) {
+        const int row = rand() % env->board_size;
+        const int col = rand() % env->board_size;
+        env->frosting[row][col] = max_int(1, env->frosting_layers);
+    }
+}
+
+static void resolve_auto_goals(CandyCrush* env) {
+    if (env->goal_target[goal_jelly_slot(env)] < 0) env->goal_target[goal_jelly_slot(env)] = env->jelly_total;
+    if (env->goal_target[goal_frosting_slot(env)] < 0) env->goal_target[goal_frosting_slot(env)] = total_frosting_layers(env);
+    if (env->goal_target[goal_ingredient_slot(env)] < 0) env->goal_target[goal_ingredient_slot(env)] = env->ingredient_total;
+    if (env->goal_target[goal_score_slot(env)] < 0) env->goal_target[goal_score_slot(env)] = max_int(1, env->max_steps * 3);
 }
 
 static void clear_board_preserving_blockers(CandyCrush* env) {
@@ -1082,16 +1263,20 @@ static void reshuffle_board(CandyCrush* env) {
 static void reset_episode(CandyCrush* env) {
     env->active_level = select_active_level(env);
     if (env->active_level >= 0) apply_level_profile(env, env->active_level);
+    else if (env->task_distribution_mode != 0 && env->level_id < 0) sample_task_distribution(env);
     else restore_base_profile(env);
     env->steps = env->score = env->total_cleared = env->invalid_swaps = env->successful_swaps = 0;
     env->total_cascades = env->max_combo = env->reshuffles = 0;
     env->jelly_cleared = env->frosting_cleared = env->level_won = 0;
     env->ingredients_dropped = 0;
-    env->color_collected = 0;
+    memset(env->color_collected, 0, sizeof(env->color_collected));
+    clear_goal_vector(env->goal_remaining);
     env->episode_return = 0.0f;
     clear_board_preserving_blockers(env);
     randomize_layout(env);
     generate_board(env);
+    resolve_auto_goals(env);
+    reset_goal_remaining(env);
     update_observations(env);
 }
 
@@ -1108,7 +1293,7 @@ static void write_episode_log(CandyCrush* env) {
     env->log.jelly_cleared += env->jelly_cleared;
     env->log.frosting_cleared += env->frosting_cleared;
     env->log.ingredient_dropped += env->ingredients_dropped;
-    env->log.color_collected += env->color_collected;
+    env->log.color_collected += total_color_collected(env);
     env->log.goal_progress += 1.0f - goal_remaining_ratio(env);
     env->log.level_wins += env->level_won;
     env->log.level_id += env->active_level >= 0 ? env->active_level : 0.0f;
@@ -1131,19 +1316,23 @@ static inline bool decode_action(CandyCrush* env, int* row, int* col, int* nrow,
 }
 
 static void init_env(CandyCrush* env) {
+    bool explicit_goal_vector = false;
     if (env->board_size < 4 || env->board_size > MAX_BOARD) { fprintf(stderr, "candy_crush: board_size must be in [4, %d]\n", MAX_BOARD); exit(1); }
     if (env->num_candies < 4 || env->num_candies > MAX_CANDIES) { fprintf(stderr, "candy_crush: num_candies must be in [4, %d]\n", MAX_CANDIES); exit(1); }
     if (env->max_steps < 1) { fprintf(stderr, "candy_crush: max_steps must be >= 1\n"); exit(1); }
-    if (env->objective_mode < GOAL_SCORE || env->objective_mode > GOAL_FROSTING) { fprintf(stderr, "candy_crush: objective_mode must be in [0, 4]\n"); exit(1); }
     if (env->frosting_layers < 1) env->frosting_layers = 1;
-    if (env->ingredient_target < 0) env->ingredient_target = 0;
     if (env->ingredient_spawn_rows < 1) env->ingredient_spawn_rows = 1;
-    if (env->target_color < 0) env->target_color = 0;
-    if (env->color_target < 0) env->color_target = 0;
-    if (env->frosting_target < 0) env->frosting_target = 0;
+    env->task_distribution_mode = env->task_distribution_mode != 0;
+    env->task_min_active_goals = clamp_int(max_int(1, env->task_min_active_goals), 1, 5);
+    env->task_max_active_goals = clamp_int(max_int(env->task_min_active_goals, env->task_max_active_goals), env->task_min_active_goals, 5);
+    env->task_min_steps = max_int(1, env->task_min_steps);
+    env->task_max_steps = max_int(env->task_min_steps, env->task_max_steps);
+    if (env->progress_reward_scale < 0.0f) env->progress_reward_scale = 0.0f;
     if (env->color_reward < 0.0f) env->color_reward = 0.0f;
     if (env->color_tile_scale < 0.0f) env->color_tile_scale = 0.0f;
     if (env->color_combo_scale < 0.0f) env->color_combo_scale = 0.0f;
+    if (env->failure_penalty < 0.0f) env->failure_penalty = 0.0f;
+    if (env->efficiency_bonus < 0.0f) env->efficiency_bonus = 0.0f;
     env->jelly_density = clamp01(env->jelly_density);
     env->frosting_density = clamp01(env->frosting_density);
     env->level_id = max_int(-1, env->level_id);
@@ -1155,15 +1344,20 @@ static void init_env(CandyCrush* env) {
     env->curriculum_threshold = clamp01(env->curriculum_threshold);
     if (env->curriculum_threshold < 0.40f) env->curriculum_threshold = 0.40f;
     env->curriculum_replay_prob = clamp01(env->curriculum_replay_prob);
+    for (int i = 0; i < goal_slot_count(env); i++) {
+        if (env->goal_target[i] != 0) explicit_goal_vector = true;
+        if (env->goal_target[i] < GOAL_AUTO) env->goal_target[i] = 0;
+    }
+    env->has_goal_vector = env->has_goal_vector || explicit_goal_vector;
+    if (!env->has_goal_vector && env->task_distribution_mode == 0 && env->level_id < 0 && env->curriculum_mode == 0) {
+        fprintf(stderr, "candy_crush: provide goal_vector or enable task_distribution/curriculum/level profiles\n");
+        exit(1);
+    }
+    clear_goal_vector(env->goal_remaining);
     env->base_max_steps = env->max_steps;
-    env->base_objective_mode = env->objective_mode;
-    env->base_score_target = env->score_target;
     env->base_frosting_layers = env->frosting_layers;
-    env->base_ingredient_target = env->ingredient_target;
     env->base_ingredient_spawn_rows = env->ingredient_spawn_rows;
-    env->base_target_color = env->target_color;
-    env->base_color_target = env->color_target;
-    env->base_frosting_target = env->frosting_target;
+    copy_goal_vector(env->base_goal_target, env->goal_target);
     env->base_jelly_density = env->jelly_density;
     env->base_frosting_density = env->frosting_density;
     env->active_level = env->level_id >= 0 ? clamp_int(env->level_id, env->curriculum_start_level, env->curriculum_max_level) : -1;
@@ -1182,6 +1376,8 @@ static void c_reset(CandyCrush* env) {
 
 static void c_step(CandyCrush* env) {
     int row, col, nrow, ncol, dir;
+    ClearStats turn_stats = {0};
+    const float goal_mass_before = goal_remaining_mass(env);
     float reward = 0.0f;
     env->rewards[0] = 0.0f; env->terminals[0] = 0; env->steps++;
     if (!decode_action(env, &row, &col, &nrow, &ncol, &dir) || !swappable_cell(env, row, col) || !swappable_cell(env, nrow, ncol)) {
@@ -1189,13 +1385,20 @@ static void c_step(CandyCrush* env) {
     } else {
         const unsigned char first = env->board[row][col], second = env->board[nrow][ncol];
         swap_cells(env, row, col, nrow, ncol);
-        if (auto_swap(first, second)) { env->successful_swaps++; reward = resolve_special_swap(env, row, col, nrow, ncol, first, second); }
+        if (auto_swap(first, second)) { env->successful_swaps++; reward = resolve_special_swap(env, row, col, nrow, ncol, first, second, &turn_stats); }
         else if (!swap_creates_match(env, row, col, nrow, ncol)) { swap_cells(env, row, col, nrow, ncol); reward = env->invalid_penalty; env->invalid_swaps++; }
-        else { env->successful_swaps++; reward = resolve_board(env, NULL, true, nrow, ncol, dir); }
+        else { env->successful_swaps++; reward = resolve_board(env, NULL, true, nrow, ncol, dir, &turn_stats); }
+        apply_goal_events(env, &turn_stats);
         if (!goal_complete(env) && !has_legal_moves(env)) { reshuffle_board(env); env->reshuffles++; reward += env->shuffle_penalty; }
     }
+    {
+        const float goal_mass_after = goal_remaining_mass(env);
+        const float progress_delta = goal_mass_before - goal_mass_after;
+        if (progress_delta > 0.0f) reward += env->progress_reward_scale * progress_delta;
+    }
     if (goal_complete(env)) {
-        reward += env->success_bonus;
+        reward += env->success_bonus
+            + env->efficiency_bonus * ((float)max_int(0, env->max_steps - env->steps) / max_int(1, env->max_steps));
         env->level_won = 1;
         env->episode_return += reward;
         env->rewards[0] = reward;
@@ -1207,10 +1410,14 @@ static void c_step(CandyCrush* env) {
         env->rewards[0] = reward;
         return;
     }
-    env->episode_return += reward; env->rewards[0] = reward; update_observations(env);
     if (env->steps >= env->max_steps) {
+        reward -= env->failure_penalty;
+        env->episode_return += reward;
+        env->rewards[0] = reward;
         env->terminals[0] = 1; record_curriculum_result(env, false); write_episode_log(env); reset_episode(env); env->rewards[0] = reward;
+        return;
     }
+    env->episode_return += reward; env->rewards[0] = reward; update_observations(env);
 }
 
 static inline char special_marker(unsigned char cell) {
@@ -1222,14 +1429,6 @@ static inline char special_marker(unsigned char cell) {
     return ' ';
 }
 
-static inline const char* goal_name(CandyCrush* env) {
-    if (env->objective_mode == GOAL_SCORE) return "Score";
-    if (env->objective_mode == GOAL_JELLY) return "Jelly";
-    if (env->objective_mode == GOAL_INGREDIENT) return "Ingredient";
-    if (env->objective_mode == GOAL_COLOR) return "Collect Color";
-    return "Clear Blockers";
-}
-
 static inline const char* candy_name(CandyCrush* env, int color) {
     static const char* names[MAX_CANDIES + 1] = {
         "None", "Red", "Green", "Blue", "Yellow", "Purple", "Teal", "Orange", "White"
@@ -1237,9 +1436,40 @@ static inline const char* candy_name(CandyCrush* env, int color) {
     return names[clamp_int(color, 0, MAX_CANDIES)];
 }
 
+static inline const char* goal_slot_name(CandyCrush* env, int slot) {
+    if (slot < env->num_candies) return candy_name(env, slot + 1);
+    if (slot == goal_jelly_slot(env)) return "Jelly";
+    if (slot == goal_frosting_slot(env)) return "Frost";
+    if (slot == goal_ingredient_slot(env)) return "Ingredient";
+    return "Score";
+}
+
+static void format_goal_label(CandyCrush* env, char* label, size_t label_size, bool remaining) {
+    int written = 0;
+    bool first = true;
+    label[0] = '\0';
+    for (int i = 0; i < goal_slot_count(env); i++) {
+        const int value = remaining ? env->goal_remaining[i] : max_int(0, env->goal_target[i]);
+        if (value <= 0) continue;
+        written += snprintf(
+            label + written,
+            written < (int)label_size ? label_size - written : 0,
+            "%s%s %d",
+            first ? "" : ", ",
+            goal_slot_name(env, i),
+            value
+        );
+        first = false;
+        if (written >= (int)label_size - 1) break;
+    }
+    if (first) snprintf(label, label_size, "None");
+}
+
 static void c_render(CandyCrush* env) {
     const int cell = 64, gap = 6, width = env->board_size * cell, height = env->board_size * cell + 136;
-    char label[96];
+    char label[192];
+    char goal_label[192];
+    char remaining_label[192];
     if (!IsWindowReady()) { InitWindow(width, height, "PufferLib Candy Crush"); SetTargetFPS(30); }
     if (IsKeyDown(KEY_ESCAPE)) { CloseWindow(); exit(0); }
     BeginDrawing(); ClearBackground(PUFF_BACKGROUND);
@@ -1266,13 +1496,12 @@ static void c_render(CandyCrush* env) {
         snprintf(label, sizeof(label), "%c", CANDY_SYMBOLS[color]); DrawText(label, x + 22, y + 12, 22, PUFF_WHITE);
         if (special_marker(candy) != ' ') { snprintf(label, sizeof(label), "%c", special_marker(candy)); DrawText(label, x + 22, y + 32, 18, PUFF_WHITE); }
     }
-    if (env->objective_mode == GOAL_COLOR) snprintf(label, sizeof(label), "Level: %d  Unlocked: %d  Goal: Collect %d %s", env->active_level >= 0 ? env->active_level : 0, env->unlocked_level, env->color_target, candy_name(env, env->target_color));
-    else if (env->objective_mode == GOAL_FROSTING) snprintf(label, sizeof(label), "Level: %d  Unlocked: %d  Goal: Clear %d blockers", env->active_level >= 0 ? env->active_level : 0, env->unlocked_level, env->frosting_target);
-    else snprintf(label, sizeof(label), "Level: %d  Unlocked: %d  Goal: %s", env->active_level >= 0 ? env->active_level : 0, env->unlocked_level, goal_name(env));
+    format_goal_label(env, goal_label, sizeof(goal_label), false);
+    format_goal_label(env, remaining_label, sizeof(remaining_label), true);
+    snprintf(label, sizeof(label), "Level: %d  Unlocked: %d  Goal: %s", env->active_level >= 0 ? env->active_level : 0, env->unlocked_level, goal_label);
     DrawText(label, 12, env->board_size * cell + 8, 22, PUFF_WHITE);
     snprintf(label, sizeof(label), "Score: %d  Steps: %d/%d", env->score, env->steps, env->max_steps); DrawText(label, 12, env->board_size * cell + 34, 22, PUFF_WHITE);
-    if (env->objective_mode == GOAL_COLOR) snprintf(label, sizeof(label), "%s collected: %d/%d  Frosting cleared: %d", candy_name(env, env->target_color), env->color_collected, env->color_target, env->frosting_cleared);
-    else snprintf(label, sizeof(label), "Jelly: %d/%d  Frosting cleared: %d", env->jelly_cleared, env->jelly_total, env->frosting_cleared);
+    snprintf(label, sizeof(label), "Remaining: %s", remaining_label);
     DrawText(label, 12, env->board_size * cell + 60, 20, PUFF_WHITE);
     snprintf(label, sizeof(label), "Ingredients: %d/%d  Combo: %d", env->ingredients_dropped, env->ingredient_total, env->max_combo); DrawText(label, 12, env->board_size * cell + 84, 20, PUFF_WHITE);
     snprintf(label, sizeof(label), "Goal remaining: %.2f  Curriculum WR: %.2f", goal_remaining_ratio(env), curriculum_win_rate(env)); DrawText(label, 12, env->board_size * cell + 104, 20, PUFF_WHITE);
