@@ -196,6 +196,8 @@ static inline int jelly_layer(CandyCrush* env) { return SPECIAL_LAYERS * env->nu
 static inline int frosting_layer(CandyCrush* env) { return SPECIAL_LAYERS * env->num_candies + 2; }
 static inline int ingredient_layer(CandyCrush* env) { return SPECIAL_LAYERS * env->num_candies + 3; }
 static inline bool is_legal_swap(CandyCrush* env, int row, int col, int nrow, int ncol);
+static inline bool is_legal_swap_cells(CandyCrush* env, int row, int col, int nrow, int ncol, unsigned char first, unsigned char second);
+static inline bool swappable_cell_value(CandyCrush* env, int row, int col, unsigned char cell);
 static inline int swap_match_color(CandyCrush* env, int row, int col, int srow, int scol, unsigned char scell, int trow, int tcol, unsigned char tcell);
 static inline float lerp_float(float start, float end, float t) { return start + (end - start) * t; }
 static inline int lerp_int(int start, int end, float t) { return (int)(lerp_float((float)start, (float)end, t) + 0.5f); }
