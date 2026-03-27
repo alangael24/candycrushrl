@@ -577,7 +577,30 @@ static inline int obs_layer(CandyCrush* env, unsigned char cell) {
     return 4 * env->num_candies + color - 1;
 }
 
-static void update_observations(CandyCrush* env) {
+static inline bool write_action_mask(CandyCrush* env, unsigned char* action_mask) {
+    bool any_legal = false;
+    for (int row = 0; row < env->board_size; row++) for (int col = 0; col < env->board_size; col++) {
+        if (col + 1 < env->board_size) {
+            const unsigned char legal = is_legal_swap(env, row, col, row, col + 1) ? 255 : 0;
+            any_legal = any_legal || legal != 0;
+            if (action_mask != NULL) {
+                action_mask[(row * env->board_size + col) * 4 + 1] = legal;
+                action_mask[(row * env->board_size + (col + 1)) * 4 + 3] = legal;
+            }
+        }
+        if (row + 1 < env->board_size) {
+            const unsigned char legal = is_legal_swap(env, row, col, row + 1, col) ? 255 : 0;
+            any_legal = any_legal || legal != 0;
+            if (action_mask != NULL) {
+                action_mask[(row * env->board_size + col) * 4 + 2] = legal;
+                action_mask[((row + 1) * env->board_size + col) * 4 + 0] = legal;
+            }
+        }
+    }
+    return any_legal;
+}
+
+static bool update_observations(CandyCrush* env) {
     const int cells = env->board_size * env->board_size;
     const int board_size = board_feature_size(env);
     const int feature_size = obs_feature_size(env);
@@ -607,18 +630,7 @@ static void update_observations(CandyCrush* env) {
     }
     {
         unsigned char* action_mask = env->observations + feature_size;
-        for (int row = 0; row < env->board_size; row++) for (int col = 0; col < env->board_size; col++) {
-            if (col + 1 < env->board_size) {
-                const unsigned char legal = is_legal_swap(env, row, col, row, col + 1) ? 255 : 0;
-                action_mask[(row * env->board_size + col) * 4 + 1] = legal;
-                action_mask[(row * env->board_size + (col + 1)) * 4 + 3] = legal;
-            }
-            if (row + 1 < env->board_size) {
-                const unsigned char legal = is_legal_swap(env, row, col, row + 1, col) ? 255 : 0;
-                action_mask[(row * env->board_size + col) * 4 + 2] = legal;
-                action_mask[((row + 1) * env->board_size + col) * 4 + 0] = legal;
-            }
-        }
+        return write_action_mask(env, action_mask);
     }
 }
 
@@ -1086,12 +1098,7 @@ static inline bool swappable_cell(CandyCrush* env, int row, int col) {
 }
 
 static bool has_legal_moves(CandyCrush* env) {
-    const int dr[2] = {0, 1}, dc[2] = {1, 0};
-    for (int row = 0; row < env->board_size; row++) for (int col = 0; col < env->board_size; col++) for (int i = 0; i < 2; i++) {
-        const int nr = row + dr[i], nc = col + dc[i];
-        if (in_bounds(env, nr, nc) && is_legal_swap(env, row, col, nr, nc)) return true;
-    }
-    return false;
+    return write_action_mask(env, NULL);
 }
 
 static inline bool creates_start_pattern(CandyCrush* env, int row, int col, unsigned char candy) {
@@ -1310,7 +1317,7 @@ static void reset_episode(CandyCrush* env) {
     generate_board(env);
     resolve_auto_goals(env);
     reset_goal_remaining(env);
-    update_observations(env);
+    (void)update_observations(env);
 }
 
 static void write_episode_log(CandyCrush* env) {
@@ -1412,6 +1419,7 @@ static void c_step(CandyCrush* env) {
     int row, col, nrow, ncol, dir;
     ClearStats turn_stats = {0};
     const float phi_before = goal_potential(env);
+    bool observations_ready = false;
     float reward = 0.0f;
     env->rewards[0] = 0.0f; env->terminals[0] = 0; env->steps++;
     if (!decode_action(env, &row, &col, &nrow, &ncol, &dir) || !swappable_cell(env, row, col) || !swappable_cell(env, nrow, ncol)) {
@@ -1423,7 +1431,15 @@ static void c_step(CandyCrush* env) {
         else if (!swap_creates_match(env, row, col, nrow, ncol)) { swap_cells(env, row, col, nrow, ncol); reward = env->invalid_penalty; env->invalid_swaps++; }
         else { env->successful_swaps++; reward = resolve_board(env, NULL, true, nrow, ncol, dir, &turn_stats); }
         apply_goal_events(env, &turn_stats);
-        if (!goal_complete(env) && !has_legal_moves(env)) { reshuffle_board(env); env->reshuffles++; reward += env->shuffle_penalty; }
+    }
+    if (!goal_complete(env)) {
+        observations_ready = true;
+        if (!update_observations(env)) {
+            reshuffle_board(env);
+            env->reshuffles++;
+            reward += env->shuffle_penalty;
+            (void)update_observations(env);
+        }
     }
     {
         const float phi_after = goal_potential(env);
@@ -1435,7 +1451,6 @@ static void c_step(CandyCrush* env) {
         env->level_won = 1;
         env->episode_return += reward;
         env->rewards[0] = reward;
-        update_observations(env);
         env->terminals[0] = 1;
         record_curriculum_result(env, true);
         write_episode_log(env);
@@ -1450,7 +1465,8 @@ static void c_step(CandyCrush* env) {
         env->terminals[0] = 1; record_curriculum_result(env, false); write_episode_log(env); reset_episode(env); env->rewards[0] = reward;
         return;
     }
-    env->episode_return += reward; env->rewards[0] = reward; update_observations(env);
+    env->episode_return += reward; env->rewards[0] = reward;
+    if (!observations_ready) (void)update_observations(env);
 }
 
 static inline char special_marker(unsigned char cell) {
