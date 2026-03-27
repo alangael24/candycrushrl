@@ -577,8 +577,43 @@ static inline int obs_layer(CandyCrush* env, unsigned char cell) {
     return 4 * env->num_candies + color - 1;
 }
 
+static inline void write_board_obs(CandyCrush* env, unsigned char* board_obs) {
+    const int cells = env->board_size * env->board_size;
+    memset(board_obs, 0, board_feature_size(env));
+    for (int row = 0; row < env->board_size; row++) for (int col = 0; col < env->board_size; col++) {
+        const int idx = row * env->board_size + col;
+        const int layer = obs_layer(env, env->board[row][col]);
+        if (layer >= 0) board_obs[layer * cells + idx] = 255;
+        if (env->jelly[row][col] > 0) board_obs[jelly_layer(env) * cells + idx] = 255;
+        if (env->frosting[row][col] > 0) {
+            board_obs[frosting_layer(env) * cells + idx] = (unsigned char)(
+                255 * env->frosting[row][col] / max_int(1, env->frosting_layers)
+            );
+        }
+    }
+}
+
+static inline void write_meta_obs(CandyCrush* env, unsigned char* meta_obs) {
+    const int slots = goal_slot_count(env);
+    const unsigned char steps = (unsigned char)(
+        255 * max_int(0, env->max_steps - env->steps) / max_int(1, env->max_steps)
+    );
+    const unsigned char goal = (unsigned char)(255 * goal_remaining_ratio(env));
+    for (int i = 0; i < slots; i++) {
+        const int target = max_int(0, env->goal_target[i]);
+        meta_obs[i] = (unsigned char)clamp_int(max_int(0, env->goal_target[i]), 0, 255);
+        meta_obs[slots + i] = (unsigned char)clamp_int(env->goal_remaining[i], 0, 255);
+        meta_obs[slots * 2 + i] = (unsigned char)(
+            255.0f * clamp01((float)env->goal_remaining[i] / max_int(1, target))
+        );
+    }
+    meta_obs[slots * 3] = steps;
+    meta_obs[slots * 3 + 1] = goal;
+}
+
 static inline bool write_action_mask(CandyCrush* env, unsigned char* action_mask) {
     bool any_legal = false;
+    if (action_mask != NULL) memset(action_mask, 0, action_count(env));
     for (int row = 0; row < env->board_size; row++) for (int col = 0; col < env->board_size; col++) {
         if (col + 1 < env->board_size) {
             const unsigned char legal = is_legal_swap(env, row, col, row, col + 1) ? 255 : 0;
@@ -601,37 +636,12 @@ static inline bool write_action_mask(CandyCrush* env, unsigned char* action_mask
 }
 
 static bool update_observations(CandyCrush* env) {
-    const int cells = env->board_size * env->board_size;
-    const int board_size = board_feature_size(env);
-    const int feature_size = obs_feature_size(env);
-    memset(env->observations, 0, feature_size + action_count(env));
-    for (int row = 0; row < env->board_size; row++) for (int col = 0; col < env->board_size; col++) {
-        const int idx = row * env->board_size + col;
-        const int layer = obs_layer(env, env->board[row][col]);
-        if (layer >= 0) env->observations[layer * cells + idx] = 255;
-        if (env->jelly[row][col] > 0) env->observations[jelly_layer(env) * cells + idx] = 255;
-        if (env->frosting[row][col] > 0) env->observations[frosting_layer(env) * cells + idx] = (unsigned char)(255 * env->frosting[row][col] / max_int(1, env->frosting_layers));
-    }
-    {
-        unsigned char* meta = env->observations + board_size;
-        const int slots = goal_slot_count(env);
-        const unsigned char steps = (unsigned char)(255 * max_int(0, env->max_steps - env->steps) / max_int(1, env->max_steps));
-        const unsigned char goal = (unsigned char)(255 * goal_remaining_ratio(env));
-        for (int i = 0; i < slots; i++) {
-            const int target = max_int(0, env->goal_target[i]);
-            meta[i] = (unsigned char)clamp_int(max_int(0, env->goal_target[i]), 0, 255);
-            meta[slots + i] = (unsigned char)clamp_int(env->goal_remaining[i], 0, 255);
-            meta[slots * 2 + i] = (unsigned char)(
-                255.0f * clamp01((float)env->goal_remaining[i] / max_int(1, target))
-            );
-        }
-        meta[slots * 3] = steps;
-        meta[slots * 3 + 1] = goal;
-    }
-    {
-        unsigned char* action_mask = env->observations + feature_size;
-        return write_action_mask(env, action_mask);
-    }
+    unsigned char* board_obs = env->observations;
+    unsigned char* meta_obs = board_obs + board_feature_size(env);
+    unsigned char* action_mask = meta_obs + scalar_feature_count(env);
+    write_board_obs(env, board_obs);
+    write_meta_obs(env, meta_obs);
+    return write_action_mask(env, action_mask);
 }
 
 static inline void push_effect(EffectQueue* q, int kind, int row, int col, int color, int count) {
