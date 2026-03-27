@@ -124,6 +124,38 @@ The next systems-performance focus should be:
 - host-specific `env x vec` geometry sweeps with `A0` fixed
 - `vec_step` only if profiling still points at env CPU after `Copy` work
 
+### Copy Path Negative Result
+
+The first `Copy`-path experiment should be treated as a negative result, not as
+a candidate baseline.
+
+- branch tested: `perf/copy-path`
+- code path tested: shared-memory NumPy -> CPU tensor view -> pinned staging
+  copy -> GPU copy
+- outcome: severe SPS regression versus `main`
+
+On the tested host, the experimental branch dropped from roughly `505k SPS` on
+`main` to roughly `66k SPS` with the staged pinned-memory copy path.
+
+The likely reason is architectural rather than environment-specific:
+
+- `torch.from_numpy()` already gave a cheap CPU view over shared memory
+- adding a pinned staging step introduced an extra host-side copy before H2D
+- `non_blocking=True` did not recover that cost because the source buffer did
+  not originate in pinned memory
+- action transfer still had to cross back into host-visible NumPy before
+  `vecenv.send(...)`
+
+Treat this as a closed lesson for the current trainer architecture:
+
+- baseline-good: shared-memory NumPy -> torch view -> direct H2D
+- baseline-bad: shared-memory NumPy -> torch view -> pinned staging -> H2D
+
+Do not resume pinned staging experiments unless one of these becomes true:
+
+- the source batch is produced directly in pinned memory
+- batch `N + 1` can be prefetched while batch `N` is computing on GPU
+
 ### Required Guardrail
 
 Any future env-side performance change must pass step-by-step equivalence
