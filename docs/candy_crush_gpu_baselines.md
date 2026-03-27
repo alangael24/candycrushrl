@@ -92,10 +92,37 @@ validated without changing observable behavior:
 - split `update_observations()` into board, meta, and mask slices
 - replace the global observation `memset` with slice-local clearing for board
   and mask only
+- cache swappable cells and reuse swap-legality inputs inside `action_mask`
+  generation
 
 Host geometry may still be tuned per machine as long as the learning regime is
 kept fixed. On one rented 4090 host, `128 x 16` outperformed `256 x 8` while
 preserving the same training regime.
+
+### Performance Milestone
+
+`main@58ba60d` is the current Candy Crush system baseline:
+
+- semantic behavior preserved by step-by-step equivalence
+- env-side observation and action-mask hot paths optimized without changing the
+  observable MDP
+- `A0` remains the learning baseline
+- `128 x 16` is the documented host geometry for the tested 4090 rental host
+
+Treat this as the default reference point when evaluating future performance
+work on Candy Crush.
+
+### Next Focus
+
+The first environment hot-path phase is considered closed. Do not reopen
+`write_board_obs`, `meta_obs`, dirty rectangles, incremental observations, or
+mask zero-removal unless a new profile clearly makes them hot again.
+
+The next systems-performance focus should be:
+
+- `Copy` path and host-to-GPU movement
+- host-specific `env x vec` geometry sweeps with `A0` fixed
+- `vec_step` only if profiling still points at env CPU after `Copy` work
 
 ### Required Guardrail
 
