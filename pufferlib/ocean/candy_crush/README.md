@@ -47,6 +47,42 @@ python -m pufferlib.pufferl train puffer_candy_crush
 python -m pufferlib.pufferl eval puffer_candy_crush
 ```
 
+For serious runs, prefer the explicit presets instead of the ambiguous default
+`candy_crush.ini`. The preset runner keeps the environment name stable while
+loading a specific config file:
+
+```bash
+python scripts/candy_crush_train_preset.py train --preset a0-taskdist
+python scripts/candy_crush_train_preset.py train --preset a0-campaign
+python scripts/candy_crush_train_preset.py train --preset throughput
+```
+
+On the profiled 4090 host, the documented learning baseline uses the `A0`
+training regime with `128 x 16` host geometry and `task_distribution_mode = 1`.
+That preset is the recommended starting point for the first policy baseline:
+
+```bash
+python scripts/candy_crush_train_preset.py train \
+  --preset a0-taskdist \
+  --device cuda \
+  --seed 101
+```
+
+`B0-taskdist` and `B0-campaign` are evaluation protocols, not new environment
+IDs:
+
+- `B0-taskdist`: run `a0-taskdist` for multiple seeds against a fixed eval split
+- `B0-campaign`: run `a0-campaign` for multiple seeds to measure authored-level
+  progression
+
+The runner accepts `b0-taskdist` and `b0-campaign` as aliases to make that
+intent explicit from the command line:
+
+```bash
+python scripts/candy_crush_train_preset.py train --preset b0-taskdist --seed 101
+python scripts/candy_crush_train_preset.py train --preset b0-campaign --seed 101
+```
+
 Useful curriculum knobs in `candy_crush.ini` or CLI env overrides:
 
 - `level_id = -1` keeps curriculum enabled; set `0..11` to lock a fixed level
@@ -64,6 +100,37 @@ Useful curriculum knobs in `candy_crush.ini` or CLI env overrides:
   = [10, 0, 10, 0, 0, 0, 0, 20, 0, 0]` can be generated automatically
 - `progress_reward_scale`, `shaping_gamma`, `success_bonus`,
   `failure_penalty`, and `efficiency_bonus` control the goal-aligned reward
+
+## Presets
+
+The repo now ships three explicit Candy Crush configs:
+
+- `pufferlib/config/ocean/candy_crush_a0_taskdist.ini`
+  `A0` learning regime, `task_distribution_mode = 1`, `curriculum_mode = 0`
+- `pufferlib/config/ocean/candy_crush_a0_campaign.ini`
+  `A0` learning regime, `task_distribution_mode = 0`, `curriculum_mode = 1`
+- `pufferlib/config/ocean/candy_crush_throughput.ini`
+  throughput-oriented stress test, not the preferred learning baseline
+
+Override host geometry per machine from the preset runner when needed:
+
+```bash
+python scripts/candy_crush_train_preset.py train \
+  --preset a0-taskdist \
+  --device cuda \
+  --env-num-envs 128 \
+  --vec-num-envs 16
+```
+
+## Guardrails
+
+The `A0` learning guardrail now defaults to the explicit `a0-taskdist` config
+instead of whatever happens to be in the default `candy_crush.ini`:
+
+```bash
+python scripts/candy_crush_a0_guardrail.py record artifacts/candy_crush_a0.json
+python scripts/candy_crush_a0_guardrail.py check artifacts/candy_crush_a0.json
+```
 
 ## Notes
 

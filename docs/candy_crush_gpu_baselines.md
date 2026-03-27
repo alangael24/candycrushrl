@@ -59,6 +59,26 @@ learning setup are not the same.
 - Use the throughput baseline when checking systems regressions or env-side
   performance changes.
 
+## Training Presets
+
+The repo now ships explicit Candy Crush preset files so training does not depend
+on the ambiguous defaults in `pufferlib/config/ocean/candy_crush.ini`.
+
+- `pufferlib/config/ocean/candy_crush_a0_taskdist.ini`
+- `pufferlib/config/ocean/candy_crush_a0_campaign.ini`
+- `pufferlib/config/ocean/candy_crush_throughput.ini`
+
+Use them through the preset runner:
+
+```bash
+python scripts/candy_crush_train_preset.py train --preset a0-taskdist
+python scripts/candy_crush_train_preset.py train --preset a0-campaign
+python scripts/candy_crush_train_preset.py train --preset throughput
+```
+
+`B0-taskdist` and `B0-campaign` should be treated as evaluation protocols over
+those presets rather than as separate environment names.
+
 ## Stage Closure
 
 This phase is considered closed and should be treated as the reference point
