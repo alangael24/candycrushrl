@@ -50,6 +50,12 @@ def apply_overrides(args: dict[str, Any], cli: argparse.Namespace) -> dict[str, 
         args["load_model_path"] = cli.load_model_path
     if getattr(cli, "render_mode", None) is not None:
         args["render_mode"] = cli.render_mode
+    if getattr(cli, "save_frames", None) is not None:
+        args["save_frames"] = cli.save_frames
+    if getattr(cli, "gif_path", None) is not None:
+        args["gif_path"] = cli.gif_path
+    if getattr(cli, "fps", None) is not None:
+        args["fps"] = cli.fps
     if cli.wandb:
         args["wandb"] = True
     if cli.neptune:
@@ -97,6 +103,9 @@ def build_parser() -> argparse.ArgumentParser:
     eval_parser = subparsers.add_parser("eval", help="Evaluate Candy Crush with an explicit preset.")
     add_shared(eval_parser)
     eval_parser.add_argument("--render-mode", default="human")
+    eval_parser.add_argument("--save-frames", type=int, default=None)
+    eval_parser.add_argument("--gif-path", default=None)
+    eval_parser.add_argument("--fps", type=float, default=None)
 
     dump = subparsers.add_parser("dump-config", help="Print the resolved nested config as JSON.")
     add_shared(dump)
