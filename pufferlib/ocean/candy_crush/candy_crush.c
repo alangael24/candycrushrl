@@ -16,13 +16,8 @@ int main() {
         .combo_bonus = 0.10f,
         .invalid_penalty = -0.20f,
         .shuffle_penalty = 0.0f,
-        .jelly_reward = 0.20f,
-        .frosting_reward = 0.10f,
-        .ingredient_reward = 1.0f,
-        .color_reward = 0.35f,
-        .color_tile_scale = 0.20f,
-        .color_combo_scale = 0.50f,
         .progress_reward_scale = 1.0f,
+        .shaping_gamma = 0.995f,
         .success_bonus = 3.0f,
         .failure_penalty = 1.0f,
         .efficiency_bonus = 0.5f,
@@ -48,7 +43,7 @@ int main() {
 
     while (!WindowShouldClose()) {
         if (IsKeyPressed(KEY_SPACE)) {
-            env.actions[0] = rand() % (env.board_size * env.board_size * 4);
+            env.actions[0] = rng_int_bounded(&env, env.board_size * env.board_size * 4);
             c_step(&env);
         }
         if (IsKeyPressed(KEY_R)) {

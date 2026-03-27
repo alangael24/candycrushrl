@@ -1,6 +1,12 @@
 #include "candy_crush.h"
 
 #define Env CandyCrush
+#define MY_SEED 1
+
+static void my_seed(Env* env, unsigned int seed) {
+    seed_rng(env, (uint64_t)seed);
+}
+
 #include "../env_binding.h"
 
 static int unpack_goal_vector(PyObject* kwargs, const char* key, Env* env) {
@@ -56,13 +62,8 @@ static int my_init(Env* env, PyObject* args, PyObject* kwargs) {
     env->combo_bonus = unpack(kwargs, "combo_bonus");
     env->invalid_penalty = unpack(kwargs, "invalid_penalty");
     env->shuffle_penalty = unpack(kwargs, "shuffle_penalty");
-    env->jelly_reward = unpack(kwargs, "jelly_reward");
-    env->frosting_reward = unpack(kwargs, "frosting_reward");
-    env->ingredient_reward = unpack(kwargs, "ingredient_reward");
-    env->color_reward = unpack(kwargs, "color_reward");
-    env->color_tile_scale = unpack(kwargs, "color_tile_scale");
-    env->color_combo_scale = unpack(kwargs, "color_combo_scale");
     env->progress_reward_scale = unpack(kwargs, "progress_reward_scale");
+    env->shaping_gamma = unpack(kwargs, "shaping_gamma");
     env->success_bonus = unpack(kwargs, "success_bonus");
     env->failure_penalty = unpack(kwargs, "failure_penalty");
     env->efficiency_bonus = unpack(kwargs, "efficiency_bonus");

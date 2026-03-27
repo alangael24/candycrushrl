@@ -30,9 +30,9 @@ into the standard PufferLib CLI as `puffer_candy_crush`.
 - Campaign levels: the early level bank starts with "collect blue candies"
   stages, then transitions into blocker-clearing stages that unlock closed-off
   board regions, with pre-placed starter specials on selected levels
-- Goal-conditioned reward shaping: dense reward comes from reduction of the
-  normalized remaining-goal vector, with terminal win/loss terms and an
-  efficiency bonus for winning early
+- Goal-conditioned reward shaping: dense reward uses PBRS on the normalized
+  remaining-goal vector, with terminal win/loss terms and an efficiency bonus
+  for winning early
 - Adaptive curriculum: unlocks harder authored levels when the frontier win
   rate crosses a threshold and still replays earlier levels occasionally
 - Task distribution mode: when enabled, resets sample compound goals and move
@@ -58,9 +58,12 @@ Useful curriculum knobs in `candy_crush.ini` or CLI env overrides:
   for `num_candies=6`, a vector can be `[red, green, blue, yellow, purple,
   teal, jelly, frosting, ingredient, score]`
 - `task_distribution_mode`, `task_min_active_goals`, `task_max_active_goals`,
-  `task_min_steps`, and `task_max_steps` control sampling from `p(tau)`
-- `progress_reward_scale`, `success_bonus`, `failure_penalty`, and
-  `efficiency_bonus` control the goal-aligned reward
+  `task_min_steps`, and `task_max_steps` control sampling from `p(tau)`;
+  task sampling treats each color slot independently, so compound goals like
+  `[red, green, blue, yellow, purple, teal, jelly, frosting, ingredient, score]
+  = [10, 0, 10, 0, 0, 0, 0, 20, 0, 0]` can be generated automatically
+- `progress_reward_scale`, `shaping_gamma`, `success_bonus`,
+  `failure_penalty`, and `efficiency_bonus` control the goal-aligned reward
 
 ## Notes
 

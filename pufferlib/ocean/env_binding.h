@@ -26,6 +26,14 @@ static int my_put(Env* env, PyObject* args, PyObject* kwargs) {
 }
 #endif
 
+static void my_seed(Env* env, unsigned int seed);
+#ifndef MY_SEED
+static void my_seed(Env* env, unsigned int seed) {
+    (void)env;
+    (void)seed;
+}
+#endif
+
 #ifndef MY_METHODS
 #define MY_METHODS {NULL, NULL, 0, NULL}
 #endif
@@ -145,6 +153,7 @@ static PyObject* env_init(PyObject* self, PyObject* args, PyObject* kwargs) {
  
     // Assumes each process has the same number of environments
     srand(seed);
+    my_seed(env, (unsigned int)seed);
 
     // If kwargs is NULL, create a new dictionary
     if (kwargs == NULL) {
@@ -184,6 +193,14 @@ static PyObject* env_reset(PyObject* self, PyObject* args) {
     if (!env){
         return NULL;
     }
+    PyObject* seed_arg = PyTuple_GetItem(args, 1);
+    if (!PyObject_TypeCheck(seed_arg, &PyLong_Type)) {
+        PyErr_SetString(PyExc_TypeError, "seed must be an integer");
+        return NULL;
+    }
+    int seed = PyLong_AsLong(seed_arg);
+    srand(seed);
+    my_seed(env, (unsigned int)seed);
     c_reset(env);
     Py_RETURN_NONE;
 }
@@ -423,6 +440,7 @@ static PyObject* vec_init(PyObject* self, PyObject* args, PyObject* kwargs) {
         // Assumes each process has the same number of environments
         int env_seed = i + seed*vec->num_envs;
         srand(env_seed);
+        my_seed(env, (unsigned int)env_seed);
  
         // Add the seed to kwargs for this environment
         PyObject* py_seed = PyLong_FromLong(env_seed);
@@ -499,7 +517,9 @@ static PyObject* vec_reset(PyObject* self, PyObject* args) {
  
     for (int i = 0; i < vec->num_envs; i++) {
         // Assumes each process has the same number of environments
-        srand(i + seed*vec->num_envs);
+        int env_seed = i + seed*vec->num_envs;
+        srand(env_seed);
+        my_seed(vec->envs[i], (unsigned int)env_seed);
         c_reset(vec->envs[i]);
     }
     Py_RETURN_NONE;
