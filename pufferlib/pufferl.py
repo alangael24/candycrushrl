@@ -93,12 +93,19 @@ class PuffeRL:
             )
 
         device = config['device']
+        device_is_cuda = (
+            device.type == 'cuda' if isinstance(device, torch.device)
+            else True if isinstance(device, int)
+            else str(device).startswith('cuda')
+        )
+        obs_dtype = pufferlib.pytorch.numpy_to_torch_dtype_dict[obs_space.dtype]
+        atn_dtype = pufferlib.pytorch.numpy_to_torch_dtype_dict[atn_space.dtype]
         self.observations = torch.zeros(segments, horizon, *obs_space.shape,
-            dtype=pufferlib.pytorch.numpy_to_torch_dtype_dict[obs_space.dtype],
-            pin_memory=device == 'cuda' and config['cpu_offload'],
+            dtype=obs_dtype,
+            pin_memory=device_is_cuda and config['cpu_offload'],
             device='cpu' if config['cpu_offload'] else device)
         self.actions = torch.zeros(segments, horizon, *atn_space.shape, device=device,
-            dtype=pufferlib.pytorch.numpy_to_torch_dtype_dict[atn_space.dtype])
+            dtype=atn_dtype)
         self.values = torch.zeros(segments, horizon, device=device)
         self.logprobs = torch.zeros(segments, horizon, device=device)
         self.rewards = torch.zeros(segments, horizon, device=device)
@@ -211,6 +218,24 @@ class PuffeRL:
         self.stats = defaultdict(list)
         self.last_stats = defaultdict(list)
         self.losses = {}
+        self.device_is_cuda = device_is_cuda
+        self.eval_obs_host = None
+        self.eval_obs_device = None
+        self.eval_rewards_host = None
+        self.eval_rewards_device = None
+        self.eval_terminals_host = None
+        self.eval_terminals_device = None
+        self.eval_actions_host = None
+        if self.device_is_cuda:
+            batch_agents = vecenv.agents_per_batch
+            batch_shape = (batch_agents, *obs_space.shape)
+            self.eval_obs_host = torch.empty(batch_shape, dtype=obs_dtype, device='cpu', pin_memory=True)
+            self.eval_obs_device = torch.empty(batch_shape, dtype=obs_dtype, device=device)
+            self.eval_rewards_host = torch.empty(batch_agents, dtype=self.rewards.dtype, device='cpu', pin_memory=True)
+            self.eval_rewards_device = torch.empty(batch_agents, dtype=self.rewards.dtype, device=device)
+            self.eval_terminals_host = torch.empty(batch_agents, dtype=torch.bool, device='cpu', pin_memory=True)
+            self.eval_terminals_device = torch.empty(batch_agents, dtype=torch.bool, device=device)
+            self.eval_actions_host = torch.empty((batch_agents, *atn_space.shape), dtype=atn_dtype, device='cpu', pin_memory=True)
 
         # Dashboard
         self.model_size = sum(p.numel() for p in policy.parameters() if p.requires_grad)
@@ -253,16 +278,29 @@ class PuffeRL:
             self.global_step += int(mask.sum())
 
             profile('eval_copy', epoch)
-            o = torch.as_tensor(o)
-            o_device = o.to(device)#, non_blocking=True)
-            r = torch.as_tensor(r).to(device)#, non_blocking=True)
-            d = torch.as_tensor(d).to(device)#, non_blocking=True)
+            o_cpu = torch.from_numpy(o)
+            r_cpu = torch.from_numpy(r)
+            d_cpu = torch.from_numpy(d)
+            if self.device_is_cuda:
+                self.eval_obs_host.copy_(o_cpu)
+                self.eval_rewards_host.copy_(r_cpu)
+                self.eval_terminals_host.copy_(d_cpu)
+                self.eval_obs_device.copy_(self.eval_obs_host, non_blocking=True)
+                self.eval_rewards_device.copy_(self.eval_rewards_host, non_blocking=True)
+                self.eval_terminals_device.copy_(self.eval_terminals_host, non_blocking=True)
+                o_device = self.eval_obs_device
+                r_device = self.eval_rewards_device
+                d_device = self.eval_terminals_device
+            else:
+                o_device = o_cpu.to(device)
+                r_device = r_cpu.to(device)
+                d_device = d_cpu.to(device)
 
             profile('eval_forward', epoch)
             with torch.no_grad(), self.amp_context:
                 state = dict(
-                    reward=r,
-                    done=d,
+                    reward=r_device,
+                    done=d_device,
                     env_id=env_id,
                     mask=mask,
                 )
@@ -273,7 +311,7 @@ class PuffeRL:
 
                 logits, value = self.policy.forward_eval(o_device, state)
                 action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
-                r = torch.clamp(r, -1, 1)
+                r_device = torch.clamp(r_device, -1, 1)
 
             profile('eval_copy', epoch)
             with torch.no_grad():
@@ -286,14 +324,14 @@ class PuffeRL:
                 batch_rows = slice(self.ep_indices[env_id.start].item(), 1+self.ep_indices[env_id.stop - 1].item())
 
                 if config['cpu_offload']:
-                    self.observations[batch_rows, l] = o
+                    self.observations[batch_rows, l] = o_cpu
                 else:
                     self.observations[batch_rows, l] = o_device
 
                 self.actions[batch_rows, l] = action
                 self.logprobs[batch_rows, l] = logprob
-                self.rewards[batch_rows, l] = r
-                self.terminals[batch_rows, l] = d.float()
+                self.rewards[batch_rows, l] = r_device
+                self.terminals[batch_rows, l] = d_device.float()
                 self.values[batch_rows, l] = value.flatten()
 
                 # Note: We are not yet handling masks in this version
@@ -305,9 +343,12 @@ class PuffeRL:
                     self.free_idx += num_full
                     self.full_rows += num_full
 
-                action = action.cpu().numpy()
-                if isinstance(logits, torch.distributions.Normal):
-                    action = np.clip(action, self.vecenv.action_space.low, self.vecenv.action_space.high)
+                if self.eval_actions_host is not None:
+                    self.eval_actions_host.copy_(action, non_blocking=True)
+                    action_host = self.eval_actions_host
+                else:
+                    action_host = action.cpu()
+                is_continuous_action = isinstance(logits, torch.distributions.Normal)
 
             profile('eval_misc', epoch)
             on_env_infos = getattr(self.logger, 'on_env_infos', None)
@@ -322,6 +363,13 @@ class PuffeRL:
                         self.stats[k].extend(v)
                     else:
                         self.stats[k].append(v)
+
+            if self.device_is_cuda:
+                torch.cuda.current_stream().synchronize()
+
+            action = action_host.numpy()
+            if is_continuous_action:
+                action = np.clip(action, self.vecenv.action_space.low, self.vecenv.action_space.high)
 
             profile('env', epoch)
             self.vecenv.send(action)
