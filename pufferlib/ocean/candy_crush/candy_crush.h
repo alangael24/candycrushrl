@@ -6,6 +6,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+
+#if defined(_WIN32)
+#include <windows.h>
+#endif
 
 #include "raylib.h"
 
@@ -26,8 +31,9 @@ typedef enum { EFFECT_ROW, EFFECT_COL, EFFECT_BLAST3, EFFECT_BLAST5, EFFECT_CROS
 typedef struct {
     float score, episode_return, episode_length, total_cleared, invalid_swaps;
     float successful_swaps, total_cascades, max_combo, reshuffles;
-    float jelly_cleared, frosting_cleared, ingredient_dropped, color_collected, goal_progress, level_wins, n;
+    float jelly_cleared, frosting_cleared, ingredient_dropped, color_collected, goal_progress, level_wins;
     float level_id, unlocked_level, curriculum_win_rate;
+    float perf_resolve_ms, perf_obs_ms, perf_board_obs_ms, perf_meta_obs_ms, perf_action_mask_ms, n;
 } Log;
 
 typedef struct { int kind, row, col, color, count; } Effect;
@@ -70,6 +76,8 @@ typedef struct {
     int goal_target[MAX_CANDIES + GOAL_EXTRA_SLOTS];
     int goal_remaining[MAX_CANDIES + GOAL_EXTRA_SLOTS];
     int has_goal_vector;
+    int profile_perf;
+    int perf_step_scope;
 
     float reward_per_tile;
     float combo_bonus;
@@ -110,6 +118,7 @@ typedef struct {
     int color_collected[MAX_CANDIES];
     int starter_striped, starter_wrapped, starter_color_bomb, starter_fish;
     float episode_return;
+    float perf_resolve_ms, perf_obs_ms, perf_board_obs_ms, perf_meta_obs_ms, perf_action_mask_ms;
 
     unsigned char board[MAX_BOARD][MAX_BOARD];
     unsigned char jelly[MAX_BOARD][MAX_BOARD];
@@ -195,6 +204,30 @@ static inline float clamp01(float value) {
     if (value < 0.0f) return 0.0f;
     if (value > 1.0f) return 1.0f;
     return value;
+}
+
+#if defined(_WIN32)
+static inline uint64_t perf_now_ns(void) {
+    static LARGE_INTEGER frequency = {0};
+    LARGE_INTEGER counter;
+    if (frequency.QuadPart == 0) QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&counter);
+    return (uint64_t)((counter.QuadPart * 1000000000ULL) / frequency.QuadPart);
+}
+#else
+static inline uint64_t perf_now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+#endif
+
+static inline float perf_elapsed_ms(uint64_t start_ns) {
+    return (float)(perf_now_ns() - start_ns) / 1000000.0f;
+}
+
+static inline bool perf_step_enabled(CandyCrush* env) {
+    return env->profile_perf != 0 && env->perf_step_scope != 0;
 }
 
 static inline int rand_int_range(CandyCrush* env, int low, int high) {
@@ -578,6 +611,8 @@ static inline int obs_layer(CandyCrush* env, unsigned char cell) {
 }
 
 static inline void write_board_obs(CandyCrush* env, unsigned char* board_obs) {
+    const bool measure = perf_step_enabled(env);
+    const uint64_t start_ns = measure ? perf_now_ns() : 0;
     const int cells = env->board_size * env->board_size;
     memset(board_obs, 0, board_feature_size(env));
     for (int row = 0; row < env->board_size; row++) for (int col = 0; col < env->board_size; col++) {
@@ -591,9 +626,12 @@ static inline void write_board_obs(CandyCrush* env, unsigned char* board_obs) {
             );
         }
     }
+    if (measure) env->perf_board_obs_ms += perf_elapsed_ms(start_ns);
 }
 
 static inline void write_meta_obs(CandyCrush* env, unsigned char* meta_obs) {
+    const bool measure = perf_step_enabled(env);
+    const uint64_t start_ns = measure ? perf_now_ns() : 0;
     const int slots = goal_slot_count(env);
     const unsigned char steps = (unsigned char)(
         255 * max_int(0, env->max_steps - env->steps) / max_int(1, env->max_steps)
@@ -609,9 +647,12 @@ static inline void write_meta_obs(CandyCrush* env, unsigned char* meta_obs) {
     }
     meta_obs[slots * 3] = steps;
     meta_obs[slots * 3 + 1] = goal;
+    if (measure) env->perf_meta_obs_ms += perf_elapsed_ms(start_ns);
 }
 
 static inline bool write_action_mask(CandyCrush* env, unsigned char* action_mask) {
+    const bool measure = perf_step_enabled(env);
+    const uint64_t start_ns = measure ? perf_now_ns() : 0;
     bool any_legal = false;
     if (action_mask != NULL) memset(action_mask, 0, action_count(env));
     for (int row = 0; row < env->board_size; row++) for (int col = 0; col < env->board_size; col++) {
@@ -632,16 +673,23 @@ static inline bool write_action_mask(CandyCrush* env, unsigned char* action_mask
             }
         }
     }
+    if (measure) env->perf_action_mask_ms += perf_elapsed_ms(start_ns);
     return any_legal;
 }
 
 static bool update_observations(CandyCrush* env) {
+    const bool measure = perf_step_enabled(env);
+    const uint64_t start_ns = measure ? perf_now_ns() : 0;
     unsigned char* board_obs = env->observations;
     unsigned char* meta_obs = board_obs + board_feature_size(env);
     unsigned char* action_mask = meta_obs + scalar_feature_count(env);
     write_board_obs(env, board_obs);
     write_meta_obs(env, meta_obs);
-    return write_action_mask(env, action_mask);
+    {
+        const bool any_legal = write_action_mask(env, action_mask);
+        if (measure) env->perf_obs_ms += perf_elapsed_ms(start_ns);
+        return any_legal;
+    }
 }
 
 static inline void push_effect(EffectQueue* q, int kind, int row, int col, int color, int count) {
@@ -896,6 +944,8 @@ static void refill_board(CandyCrush* env) {
 }
 
 static float resolve_board(CandyCrush* env, EffectQueue* seed, bool prefer, int pref_row, int pref_col, int move_dir, ClearStats* turn_stats) {
+    const bool measure = perf_step_enabled(env);
+    const uint64_t start_ns = measure ? perf_now_ns() : 0;
     EffectQueue cur = {0}, post = {0};
     float reward = 0.0f;
     const float tile_reward = objective_tile_reward(env);
@@ -948,6 +998,7 @@ static float resolve_board(CandyCrush* env, EffectQueue* seed, bool prefer, int 
     }
     env->max_combo = max_int(env->max_combo, combo);
     env->total_cascades += max_int(0, combo - 1);
+    if (measure) env->perf_resolve_ms += perf_elapsed_ms(start_ns);
     return reward;
 }
 
@@ -1322,6 +1373,12 @@ static void reset_episode(CandyCrush* env) {
     memset(env->color_collected, 0, sizeof(env->color_collected));
     clear_goal_vector(env->goal_remaining);
     env->episode_return = 0.0f;
+    env->perf_step_scope = 0;
+    env->perf_resolve_ms = 0.0f;
+    env->perf_obs_ms = 0.0f;
+    env->perf_board_obs_ms = 0.0f;
+    env->perf_meta_obs_ms = 0.0f;
+    env->perf_action_mask_ms = 0.0f;
     clear_board_preserving_blockers(env);
     randomize_layout(env);
     generate_board(env);
@@ -1331,6 +1388,7 @@ static void reset_episode(CandyCrush* env) {
 }
 
 static void write_episode_log(CandyCrush* env) {
+    const float inv_steps = 1.0f / max_int(1, env->steps);
     env->log.score += env->score;
     env->log.episode_return += env->episode_return;
     env->log.episode_length += env->steps;
@@ -1349,6 +1407,11 @@ static void write_episode_log(CandyCrush* env) {
     env->log.level_id += env->active_level >= 0 ? env->active_level : 0.0f;
     env->log.unlocked_level += env->unlocked_level;
     env->log.curriculum_win_rate += curriculum_win_rate(env);
+    env->log.perf_resolve_ms += env->perf_resolve_ms * inv_steps;
+    env->log.perf_obs_ms += env->perf_obs_ms * inv_steps;
+    env->log.perf_board_obs_ms += env->perf_board_obs_ms * inv_steps;
+    env->log.perf_meta_obs_ms += env->perf_meta_obs_ms * inv_steps;
+    env->log.perf_action_mask_ms += env->perf_action_mask_ms * inv_steps;
     env->log.n += 1.0f;
 }
 
@@ -1377,6 +1440,8 @@ static void init_env(CandyCrush* env) {
     env->task_max_active_goals = clamp_int(max_int(env->task_min_active_goals, env->task_max_active_goals), env->task_min_active_goals, goal_slot_count(env));
     env->task_min_steps = max_int(1, env->task_min_steps);
     env->task_max_steps = max_int(env->task_min_steps, env->task_max_steps);
+    env->profile_perf = env->profile_perf != 0;
+    env->perf_step_scope = 0;
     if (env->progress_reward_scale < 0.0f) env->progress_reward_scale = 0.0f;
     if (env->shaping_gamma == 0.0f) env->shaping_gamma = 0.995f;
     env->shaping_gamma = clamp01(env->shaping_gamma);
@@ -1431,6 +1496,7 @@ static void c_step(CandyCrush* env) {
     const float phi_before = goal_potential(env);
     bool observations_ready = false;
     float reward = 0.0f;
+    env->perf_step_scope = env->profile_perf;
     env->rewards[0] = 0.0f; env->terminals[0] = 0; env->steps++;
     if (!decode_action(env, &row, &col, &nrow, &ncol, &dir) || !swappable_cell(env, row, col) || !swappable_cell(env, nrow, ncol)) {
         reward = env->invalid_penalty; env->invalid_swaps++;
@@ -1464,6 +1530,7 @@ static void c_step(CandyCrush* env) {
         env->terminals[0] = 1;
         record_curriculum_result(env, true);
         write_episode_log(env);
+        env->perf_step_scope = 0;
         reset_episode(env);
         env->rewards[0] = reward;
         return;
@@ -1472,11 +1539,12 @@ static void c_step(CandyCrush* env) {
         reward -= env->failure_penalty;
         env->episode_return += reward;
         env->rewards[0] = reward;
-        env->terminals[0] = 1; record_curriculum_result(env, false); write_episode_log(env); reset_episode(env); env->rewards[0] = reward;
+        env->terminals[0] = 1; record_curriculum_result(env, false); write_episode_log(env); env->perf_step_scope = 0; reset_episode(env); env->rewards[0] = reward;
         return;
     }
     env->episode_return += reward; env->rewards[0] = reward;
     if (!observations_ready) (void)update_observations(env);
+    env->perf_step_scope = 0;
 }
 
 static inline char special_marker(unsigned char cell) {

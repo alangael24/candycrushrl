@@ -58,6 +58,7 @@ static int my_init(Env* env, PyObject* args, PyObject* kwargs) {
     env->task_max_active_goals = unpack(kwargs, "task_max_active_goals");
     env->task_min_steps = unpack(kwargs, "task_min_steps");
     env->task_max_steps = unpack(kwargs, "task_max_steps");
+    env->profile_perf = unpack(kwargs, "profile_perf");
     env->reward_per_tile = unpack(kwargs, "reward_per_tile");
     env->combo_bonus = unpack(kwargs, "combo_bonus");
     env->invalid_penalty = unpack(kwargs, "invalid_penalty");
@@ -101,5 +102,10 @@ static int my_log(PyObject* dict, Log* log) {
     assign_to_dict(dict, "level_id", log->level_id);
     assign_to_dict(dict, "unlocked_level", log->unlocked_level);
     assign_to_dict(dict, "curriculum_win_rate", log->curriculum_win_rate);
+    assign_to_dict(dict, "perf_resolve_ms", log->perf_resolve_ms);
+    assign_to_dict(dict, "perf_obs_ms", log->perf_obs_ms);
+    assign_to_dict(dict, "perf_board_obs_ms", log->perf_board_obs_ms);
+    assign_to_dict(dict, "perf_meta_obs_ms", log->perf_meta_obs_ms);
+    assign_to_dict(dict, "perf_action_mask_ms", log->perf_action_mask_ms);
     return 0;
 }

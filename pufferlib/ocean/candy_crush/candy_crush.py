@@ -22,6 +22,7 @@ class CandyCrush(pufferlib.PufferEnv):
         task_max_active_goals=3,
         task_min_steps=22,
         task_max_steps=40,
+        profile_perf=0,
         reward_per_tile=0.05,
         combo_bonus=0.10,
         invalid_penalty=-0.20,
@@ -74,6 +75,7 @@ class CandyCrush(pufferlib.PufferEnv):
         self.task_max_active_goals = task_max_active_goals
         self.task_min_steps = task_min_steps
         self.task_max_steps = task_max_steps
+        self.profile_perf = profile_perf
         self.reward_per_tile = reward_per_tile
         self.combo_bonus = combo_bonus
         self.invalid_penalty = invalid_penalty
@@ -122,6 +124,7 @@ class CandyCrush(pufferlib.PufferEnv):
             task_max_active_goals=self.task_max_active_goals,
             task_min_steps=self.task_min_steps,
             task_max_steps=self.task_max_steps,
+            profile_perf=self.profile_perf,
             reward_per_tile=self.reward_per_tile,
             combo_bonus=self.combo_bonus,
             invalid_penalty=self.invalid_penalty,
