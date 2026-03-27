@@ -48,7 +48,7 @@ def apply_overrides(args: dict[str, Any], cli: argparse.Namespace) -> dict[str, 
         args["tag"] = cli.tag
     if cli.load_model_path is not None:
         args["load_model_path"] = cli.load_model_path
-    if cli.render_mode is not None:
+    if getattr(cli, "render_mode", None) is not None:
         args["render_mode"] = cli.render_mode
     if cli.wandb:
         args["wandb"] = True
