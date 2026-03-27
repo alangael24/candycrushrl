@@ -654,22 +654,36 @@ static inline bool write_action_mask(CandyCrush* env, unsigned char* action_mask
     const bool measure = perf_step_enabled(env);
     const uint64_t start_ns = measure ? perf_now_ns() : 0;
     bool any_legal = false;
+    const int bs = env->board_size;
+    bool swappable[MAX_BOARD][MAX_BOARD];
     if (action_mask != NULL) memset(action_mask, 0, action_count(env));
-    for (int row = 0; row < env->board_size; row++) for (int col = 0; col < env->board_size; col++) {
-        if (col + 1 < env->board_size) {
-            const unsigned char legal = is_legal_swap(env, row, col, row, col + 1) ? 255 : 0;
+    for (int row = 0; row < bs; row++) for (int col = 0; col < bs; col++) {
+        swappable[row][col] = swappable_cell_value(env, row, col, env->board[row][col]);
+    }
+    for (int row = 0; row < bs; row++) for (int col = 0; col < bs; col++) {
+        const int idx = row * bs + col;
+        const int base = idx * 4;
+        const unsigned char first = env->board[row][col];
+        if (col + 1 < bs) {
+            unsigned char legal = 0;
+            if (swappable[row][col] && swappable[row][col + 1]) {
+                legal = is_legal_swap_cells(env, row, col, row, col + 1, first, env->board[row][col + 1]) ? 255 : 0;
+            }
             any_legal = any_legal || legal != 0;
             if (action_mask != NULL) {
-                action_mask[(row * env->board_size + col) * 4 + 1] = legal;
-                action_mask[(row * env->board_size + (col + 1)) * 4 + 3] = legal;
+                action_mask[base + 1] = legal;
+                action_mask[(idx + 1) * 4 + 3] = legal;
             }
         }
-        if (row + 1 < env->board_size) {
-            const unsigned char legal = is_legal_swap(env, row, col, row + 1, col) ? 255 : 0;
+        if (row + 1 < bs) {
+            unsigned char legal = 0;
+            if (swappable[row][col] && swappable[row + 1][col]) {
+                legal = is_legal_swap_cells(env, row, col, row + 1, col, first, env->board[row + 1][col]) ? 255 : 0;
+            }
             any_legal = any_legal || legal != 0;
             if (action_mask != NULL) {
-                action_mask[(row * env->board_size + col) * 4 + 2] = legal;
-                action_mask[((row + 1) * env->board_size + col) * 4 + 0] = legal;
+                action_mask[base + 2] = legal;
+                action_mask[(idx + bs) * 4 + 0] = legal;
             }
         }
     }
@@ -1102,6 +1116,7 @@ static inline bool swap_creates_match(CandyCrush* env, int row, int col, int nro
 }
 
 static inline bool swappable_cell(CandyCrush* env, int row, int col);
+static inline bool swappable_cell_value(CandyCrush* env, int row, int col, unsigned char cell);
 
 static inline int swap_match_color(CandyCrush* env, int row, int col, int srow, int scol, unsigned char scell, int trow, int tcol, unsigned char tcell) {
     if (row == srow && col == scol) return match_color(scell);
@@ -1145,17 +1160,28 @@ static inline bool square_match_after_swap(CandyCrush* env, int row, int col, in
     return false;
 }
 
+static inline bool is_legal_swap_cells(CandyCrush* env, int row, int col, int nrow, int ncol, unsigned char first, unsigned char second) {
+    if (!swappable_cell_value(env, row, col, first) || !swappable_cell_value(env, nrow, ncol, second)) return false;
+    if (auto_swap(first, second)) return true;
+    if (first == second && cell_special(first) == SPECIAL_NONE) return false;
+    return line_match_after_swap(env, row, col, row, col, second, nrow, ncol, first)
+        || square_match_after_swap(env, row, col, row, col, second, nrow, ncol, first)
+        || line_match_after_swap(env, nrow, ncol, row, col, second, nrow, ncol, first)
+        || square_match_after_swap(env, nrow, ncol, row, col, second, nrow, ncol, first);
+}
+
 static inline bool is_legal_swap(CandyCrush* env, int row, int col, int nrow, int ncol) {
-    if (!swappable_cell(env, row, col) || !swappable_cell(env, nrow, ncol)) return false;
-    if (auto_swap(env->board[row][col], env->board[nrow][ncol])) return true;
-    return line_match_after_swap(env, row, col, row, col, env->board[nrow][ncol], nrow, ncol, env->board[row][col])
-        || square_match_after_swap(env, row, col, row, col, env->board[nrow][ncol], nrow, ncol, env->board[row][col])
-        || line_match_after_swap(env, nrow, ncol, row, col, env->board[nrow][ncol], nrow, ncol, env->board[row][col])
-        || square_match_after_swap(env, nrow, ncol, row, col, env->board[nrow][ncol], nrow, ncol, env->board[row][col]);
+    return in_bounds(env, row, col)
+        && in_bounds(env, nrow, ncol)
+        && is_legal_swap_cells(env, row, col, nrow, ncol, env->board[row][col], env->board[nrow][ncol]);
 }
 
 static inline bool swappable_cell(CandyCrush* env, int row, int col) {
-    return in_bounds(env, row, col) && env->frosting[row][col] == 0 && !is_empty(env->board[row][col]) && !is_ingredient(env->board[row][col]);
+    return in_bounds(env, row, col) && swappable_cell_value(env, row, col, env->board[row][col]);
+}
+
+static inline bool swappable_cell_value(CandyCrush* env, int row, int col, unsigned char cell) {
+    return env->frosting[row][col] == 0 && !is_empty(cell) && !is_ingredient(cell);
 }
 
 static bool has_legal_moves(CandyCrush* env) {
