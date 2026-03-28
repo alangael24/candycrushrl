@@ -79,6 +79,35 @@ python scripts/candy_crush_train_preset.py train --preset throughput
 `B0-taskdist` and `B0-campaign` should be treated as evaluation protocols over
 those presets rather than as separate environment names.
 
+## Frozen Screen Protocol
+
+Short Candy Crush screening runs should now use a fixed 200M protocol on
+`candy-crush-trainer-controls`:
+
+- preset: `screen-200m`
+- `total_timesteps = 200_000_000`
+- `lr_schedule_timesteps = 1_000_000_000`
+- `prio_anneal_timesteps = 1_000_000_000`
+- host geometry: `env.num_envs = 128`, `vec.num_envs = 16`
+- `--seed` in the preset runner also syncs `vec.seed`
+- checkpoints every ~50M via `checkpoint_interval = 381`
+
+Use the fixed evaluation split to compare 200M screens:
+
+```bash
+python scripts/candy_crush_fixed_eval.py \
+  --preset screen-200m \
+  --device cpu \
+  --load-model-path /path/to/model.pt \
+  --json-out artifacts/candy_crush_fixed_eval.json
+```
+
+The fixed eval defaults are:
+
+- `episodes = 256`
+- `seed_start = 5000`
+- `action_seed = 20260327`
+
 ## Stage Closure
 
 This phase is considered closed and should be treated as the reference point
