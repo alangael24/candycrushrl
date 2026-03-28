@@ -70,9 +70,9 @@ def seed_everything(seed, deterministic=True):
     torch.backends.cudnn.benchmark = not deterministic
 
 
-def resolve_scheduler_epochs(config):
+def resolve_schedule_epochs(config, config_key):
     batch_size = max(1, int(config['batch_size']))
-    schedule_timesteps = config.get('lr_schedule_timesteps')
+    schedule_timesteps = config.get(config_key)
     if schedule_timesteps is None or int(schedule_timesteps) <= 0:
         schedule_timesteps = config['total_timesteps']
 
@@ -208,11 +208,12 @@ class PuffeRL:
             self.logger = NoLogger(config)
 
         # Learning rate scheduler
-        epochs = resolve_scheduler_epochs(config)
+        self.lr_schedule_epochs = resolve_schedule_epochs(config, 'lr_schedule_timesteps')
+        self.prio_anneal_epochs = resolve_schedule_epochs(config, 'prio_anneal_timesteps')
         eta_min = config['learning_rate'] * config['min_lr_ratio']
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=epochs, eta_min=eta_min)
-        self.total_epochs = epochs
+            optimizer, T_max=self.lr_schedule_epochs, eta_min=eta_min)
+        self.total_epochs = self.lr_schedule_epochs
 
         # Automatic mixed precision
         precision = config['precision']
@@ -371,7 +372,7 @@ class PuffeRL:
         a = config['prio_alpha']
         clip_coef = config['clip_coef']
         vf_clip = config['vf_clip_coef']
-        anneal_beta = b0 + (1 - b0)*a*self.epoch/self.total_epochs
+        anneal_beta = b0 + (1 - b0)*a*self.epoch/self.prio_anneal_epochs
         self.ratio[:] = 1
 
         for mb in range(self.total_minibatches):

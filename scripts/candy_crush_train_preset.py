@@ -40,6 +40,7 @@ def apply_overrides(args: dict[str, Any], cli: argparse.Namespace) -> dict[str, 
         args["train"]["total_timesteps"] = cli.total_timesteps
     if cli.seed is not None:
         args["train"]["seed"] = cli.seed
+        args["vec"]["seed"] = cli.seed
     if cli.env_num_envs is not None:
         args["env"]["num_envs"] = cli.env_num_envs
     if cli.vec_num_envs is not None:
