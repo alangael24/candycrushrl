@@ -122,6 +122,10 @@ The repo now ships three explicit Candy Crush configs:
 - `pufferlib/config/ocean/candy_crush_family_ft.ini`
   200M fine-tune preset that isolates mechanics: the mixed bucket over-samples
   `frosting` and `ingredient`, but keeps tasks mostly in the `1-2` goal range
+- `pufferlib/config/ocean/candy_crush_ingredient_ft.ini`
+  200M fine-tune preset that isolates `ingredient`: the mixed bucket keeps
+  tasks mostly in the `1-2` goal range and over-samples ingredient without
+  forcing `3-goal` composition
 - `pufferlib/config/ocean/candy_crush_throughput.ini`
   throughput-oriented stress test, not the preferred learning baseline
 
@@ -167,6 +171,16 @@ composition, use:
 ```bash
 python scripts/candy_crush_train_preset.py train \
   --preset family-ft \
+  --device cuda \
+  --seed 101 \
+  --load-model-path /path/to/model.pt
+```
+
+To isolate `ingredient` alone from the same MLP baseline, use:
+
+```bash
+python scripts/candy_crush_train_preset.py train \
+  --preset ingredient-ft \
   --device cuda \
   --seed 101 \
   --load-model-path /path/to/model.pt
