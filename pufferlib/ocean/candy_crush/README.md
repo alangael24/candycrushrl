@@ -54,6 +54,7 @@ loading a specific config file:
 ```bash
 python scripts/candy_crush_train_preset.py train --preset a0-taskdist
 python scripts/candy_crush_train_preset.py train --preset a0-campaign
+python scripts/candy_crush_train_preset.py train --preset hardmix-ft
 python scripts/candy_crush_train_preset.py train --preset throughput
 ```
 
@@ -81,6 +82,20 @@ intent explicit from the command line:
 ```bash
 python scripts/candy_crush_train_preset.py train --preset b0-taskdist --seed 101
 python scripts/candy_crush_train_preset.py train --preset b0-campaign --seed 101
+python scripts/candy_crush_train_preset.py train --preset b1-hardmix-ft --seed 101
+```
+
+For bounded evaluation runs with slice metrics, use the preset runner `eval`
+mode instead of the generic infinite viewer. It reports overall metrics plus
+per-slice summaries by active-goal count, task family, and sampled step budget:
+
+```bash
+python scripts/candy_crush_train_preset.py eval \
+  --preset b0-taskdist \
+  --load-model-path experiments/puffer_candy_crush_<runid>/model_puffer_candy_crush_<epoch>.pt \
+  --render-mode None \
+  --episodes 128 \
+  --json-out artifacts/candy_crush_eval_slices.json
 ```
 
 Useful curriculum knobs in `candy_crush.ini` or CLI env overrides:
@@ -109,8 +124,21 @@ The repo now ships three explicit Candy Crush configs:
   `A0` learning regime, `task_distribution_mode = 1`, `curriculum_mode = 0`
 - `pufferlib/config/ocean/candy_crush_a0_campaign.ini`
   `A0` learning regime, `task_distribution_mode = 0`, `curriculum_mode = 1`
+- `pufferlib/config/ocean/candy_crush_hardmix_ft.ini`
+  fine-tune preset for harder task slices: `2-3` active goals, family-weighted
+  sampling, at least one blocker-family goal (`frosting` or `ingredient`), and
+  `ent_coef = 0.02`
 - `pufferlib/config/ocean/candy_crush_throughput.ini`
   throughput-oriented stress test, not the preferred learning baseline
+
+Fine-tune from an existing checkpoint with:
+
+```bash
+python scripts/candy_crush_train_preset.py train \
+  --preset hardmix-ft \
+  --device cuda \
+  --load-model-path experiments/puffer_candy_crush_<runid>/model_puffer_candy_crush_<epoch>.pt
+```
 
 Override host geometry per machine from the preset runner when needed:
 
