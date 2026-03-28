@@ -10,6 +10,7 @@ import os
 import sys
 import glob
 import ast
+import math
 import time
 import random
 import shutil
@@ -55,21 +56,44 @@ from torch.utils.cpp_extension import (
 # and can find CUDA or HIP in the system
 ADVANTAGE_CUDA = bool(CUDA_HOME or ROCM_HOME)
 
+
+def seed_everything(seed, deterministic=True):
+    seed = int(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+
+    torch.backends.cudnn.deterministic = deterministic
+    torch.backends.cudnn.benchmark = not deterministic
+
+
+def resolve_scheduler_epochs(config):
+    batch_size = max(1, int(config['batch_size']))
+    schedule_timesteps = config.get('lr_schedule_timesteps')
+    if schedule_timesteps is None or int(schedule_timesteps) <= 0:
+        schedule_timesteps = config['total_timesteps']
+
+    schedule_timesteps = max(batch_size, int(schedule_timesteps))
+    return math.ceil(schedule_timesteps / batch_size)
+
+
+def resolve_trainer_state_path(model_path):
+    if model_path is None:
+        return None
+    return os.path.join(os.path.dirname(model_path), 'trainer_state.pt')
+
 class PuffeRL:
     def __init__(self, config, vecenv, policy, logger=None):
         # Backend perf optimization
         torch.set_float32_matmul_precision('high')
         torch.backends.cudnn.deterministic = config['torch_deterministic']
-        torch.backends.cudnn.benchmark = True
-
-        # Reproducibility
-        seed = config['seed']
-        #random.seed(seed)
-        #np.random.seed(seed)
-        #torch.manual_seed(seed)
+        torch.backends.cudnn.benchmark = not config['torch_deterministic']
 
         # Vecenv info
-        vecenv.async_reset(seed)
+        vecenv.async_reset(config['seed'])
         obs_space = vecenv.single_observation_space
         atn_space = vecenv.single_action_space
         total_agents = vecenv.num_agents
@@ -184,7 +208,7 @@ class PuffeRL:
             self.logger = NoLogger(config)
 
         # Learning rate scheduler
-        epochs = config['total_timesteps'] // config['batch_size']
+        epochs = resolve_scheduler_epochs(config)
         eta_min = config['learning_rate'] * config['min_lr_ratio']
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer, T_max=epochs, eta_min=eta_min)
@@ -545,6 +569,7 @@ class PuffeRL:
 
         state = {
             'optimizer_state_dict': self.optimizer.state_dict(),
+            'scheduler_state_dict': self.scheduler.state_dict(),
             'global_step': self.global_step,
             'agent_step': self.global_step,
             'update': self.epoch,
@@ -914,6 +939,7 @@ class WandbLogger:
 
 def train(env_name, args=None, vecenv=None, policy=None, logger=None, early_stop_fn=None):
     args = args or load_config(env_name)
+    seed_everything(args['train']['seed'], args['train']['torch_deterministic'])
 
     # Assume TorchRun DDP is used if LOCAL_RANK is set
     if 'LOCAL_RANK' in os.environ:
@@ -955,6 +981,7 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None, early_stop
         on_run_start(args=args, env_name=env_name, policy=policy, vecenv=vecenv)
 
     pufferl = PuffeRL(train_config, vecenv, policy, logger)
+    restore_trainer_state(pufferl, args)
 
     # Sweep needs data for early stopped runs, so send data when steps > 100M
     logging_threshold = min(0.20*train_config['total_timesteps'], 100_000_000)
@@ -1036,6 +1063,7 @@ def observe(env_name, args=None, vecenv=None, policy=None, logger=None, early_st
 
 def eval(env_name, args=None, vecenv=None, policy=None):
     args = args or load_config(env_name)
+    seed_everything(args['train']['seed'], args['train']['torch_deterministic'])
     backend = args['vec']['backend']
     if backend != 'PufferEnv':
         backend = 'Serial'
@@ -1247,6 +1275,7 @@ def load_policy(args, vecenv, env_name=''):
         state_dict = torch.load(path, map_location=device)
         state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
         policy.load_state_dict(state_dict)
+        args['_resolved_model_path'] = path
 
     load_path = args['load_model_path']
     if load_path == 'latest':
@@ -1256,11 +1285,34 @@ def load_policy(args, vecenv, env_name=''):
         state_dict = torch.load(load_path, map_location=device)
         state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
         policy.load_state_dict(state_dict)
+        args['_resolved_model_path'] = load_path
         #state_path = os.path.join(*load_path.split('/')[:-1], 'state.pt')
         #optim_state = torch.load(state_path)['optimizer_state_dict']
         #pufferl.optimizer.load_state_dict(optim_state)
 
     return policy
+
+
+def restore_trainer_state(pufferl, args):
+    load_path = args.get('_resolved_model_path')
+    state_path = resolve_trainer_state_path(load_path)
+    if state_path is None or not os.path.exists(state_path):
+        return
+
+    state = torch.load(state_path, map_location='cpu')
+
+    optimizer_state = state.get('optimizer_state_dict')
+    if optimizer_state is not None:
+        pufferl.optimizer.load_state_dict(optimizer_state)
+
+    scheduler_state = state.get('scheduler_state_dict')
+    if scheduler_state is not None:
+        pufferl.scheduler.load_state_dict(scheduler_state)
+
+    pufferl.global_step = int(state.get('global_step', pufferl.global_step))
+    pufferl.epoch = int(state.get('update', pufferl.epoch))
+    pufferl.last_log_step = pufferl.global_step
+    pufferl.last_log_time = time.time()
 
 def load_config(env_name, parser=None):
     puffer_dir = os.path.dirname(os.path.realpath(__file__))
