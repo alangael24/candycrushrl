@@ -20,15 +20,50 @@ import numpy as np
 
 
 class CandyCrush(nn.Module):
-    def __init__(self, env, hidden_size=256, **kwargs):
+    def __init__(self, env, hidden_size=256, board_channels=32, meta_hidden_size=128, **kwargs):
         super().__init__()
         self.hidden_size = hidden_size
         self.is_continuous = False
         self.num_actions = env.single_action_space.n
         self.obs_dim = int(np.prod(env.single_observation_space.shape))
         self.feature_dim = self.obs_dim - self.num_actions
-        self.encoder = nn.Sequential(
-            layer_init(nn.Linear(self.feature_dim, hidden_size)),
+        self.board_size = env.board_size
+        self.num_candies = env.num_candies
+        self.board_layers = self.num_candies * 5 + 4
+        self.goal_slots = self.num_candies + 4
+        self.meta_dim = self.goal_slots * 3 + 2
+        self.board_dim = self.board_layers * self.board_size * self.board_size
+        self.board_out_channels = board_channels * 2
+
+        if self.board_dim + self.meta_dim != self.feature_dim:
+            raise RuntimeError(
+                "CandyCrush observation layout mismatch: "
+                f"board_dim={self.board_dim}, meta_dim={self.meta_dim}, feature_dim={self.feature_dim}"
+            )
+
+        # Keep full 8x8 resolution through the spatial stack; do not downsample early.
+        self.board_encoder = nn.Sequential(
+            layer_init(nn.Conv2d(self.board_layers, board_channels, kernel_size=3, padding=1)),
+            nn.GELU(),
+            layer_init(nn.Conv2d(board_channels, board_channels, kernel_size=3, padding=1)),
+            nn.GELU(),
+            layer_init(nn.Conv2d(board_channels, self.board_out_channels, kernel_size=3, padding=1)),
+            nn.GELU(),
+            nn.Flatten(),
+        )
+        board_out_dim = self.board_out_channels * self.board_size * self.board_size
+        self.board_projection = nn.Sequential(
+            layer_init(nn.Linear(board_out_dim, hidden_size)),
+            nn.GELU(),
+        )
+        self.meta_encoder = nn.Sequential(
+            layer_init(nn.Linear(self.meta_dim, meta_hidden_size)),
+            nn.GELU(),
+            layer_init(nn.Linear(meta_hidden_size, meta_hidden_size)),
+            nn.GELU(),
+        )
+        self.fusion = nn.Sequential(
+            layer_init(nn.Linear(hidden_size + meta_hidden_size, hidden_size)),
             nn.GELU(),
             layer_init(nn.Linear(hidden_size, hidden_size)),
             nn.GELU(),
@@ -61,7 +96,13 @@ class CandyCrush(nn.Module):
                 '`python setup.py build_ext --inplace --force`.'
             )
         self.action_mask = action_mask
-        return self.encoder(features)
+        board = features[:, :self.board_dim].reshape(
+            observations.shape[0], self.board_layers, self.board_size, self.board_size
+        )
+        meta = features[:, self.board_dim:self.board_dim + self.meta_dim]
+        board_hidden = self.board_projection(self.board_encoder(board))
+        meta_hidden = self.meta_encoder(meta)
+        return self.fusion(torch.cat([board_hidden, meta_hidden], dim=1))
 
     def decode_actions(self, hidden):
         logits = self.actor(hidden)
