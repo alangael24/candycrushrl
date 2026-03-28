@@ -15,6 +15,7 @@ PRESET_FILES = {
     "a0-taskdist": REPO_ROOT / "pufferlib" / "config" / "ocean" / "candy_crush_a0_taskdist.ini",
     "a0-campaign": REPO_ROOT / "pufferlib" / "config" / "ocean" / "candy_crush_a0_campaign.ini",
     "composition-ft": REPO_ROOT / "pufferlib" / "config" / "ocean" / "candy_crush_composition_ft.ini",
+    "family-ft": REPO_ROOT / "pufferlib" / "config" / "ocean" / "candy_crush_family_ft.ini",
     "mixed-hard-ft": REPO_ROOT / "pufferlib" / "config" / "ocean" / "candy_crush_mixed_hard_ft.ini",
     "screen-200m": REPO_ROOT / "pufferlib" / "config" / "ocean" / "candy_crush_screen_200m.ini",
     "throughput": REPO_ROOT / "pufferlib" / "config" / "ocean" / "candy_crush_throughput.ini",
@@ -23,6 +24,7 @@ PRESET_ALIASES = {
     "b0-taskdist": "a0-taskdist",
     "b0-campaign": "a0-campaign",
     "b1-composition-ft": "composition-ft",
+    "b1-family-ft": "family-ft",
     "b1-mixed-hard-ft": "mixed-hard-ft",
     "screen-short": "screen-200m",
 }
