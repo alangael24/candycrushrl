@@ -27,6 +27,7 @@ class CandyCrush(pufferlib.PufferEnv):
         invalid_penalty=-0.20,
         shuffle_penalty=0.0,
         progress_reward_scale=1.0,
+        ingredient_progress_scale=0.0,
         shaping_gamma=0.995,
         success_bonus=3.0,
         failure_penalty=1.0,
@@ -79,6 +80,7 @@ class CandyCrush(pufferlib.PufferEnv):
         self.invalid_penalty = invalid_penalty
         self.shuffle_penalty = shuffle_penalty
         self.progress_reward_scale = progress_reward_scale
+        self.ingredient_progress_scale = ingredient_progress_scale
         self.shaping_gamma = shaping_gamma
         self.success_bonus = success_bonus
         self.failure_penalty = failure_penalty
@@ -127,6 +129,7 @@ class CandyCrush(pufferlib.PufferEnv):
             invalid_penalty=self.invalid_penalty,
             shuffle_penalty=self.shuffle_penalty,
             progress_reward_scale=self.progress_reward_scale,
+            ingredient_progress_scale=self.ingredient_progress_scale,
             shaping_gamma=self.shaping_gamma,
             success_bonus=self.success_bonus,
             failure_penalty=self.failure_penalty,

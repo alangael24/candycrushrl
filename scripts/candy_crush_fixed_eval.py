@@ -23,12 +23,16 @@ from pufferlib.ocean.torch import CandyCrush as CandyCrushPolicy
 PRESET_FILES = {
     "a0-taskdist": REPO_ROOT / "pufferlib" / "config" / "ocean" / "candy_crush_a0_taskdist.ini",
     "a0-campaign": REPO_ROOT / "pufferlib" / "config" / "ocean" / "candy_crush_a0_campaign.ini",
+    "ingredient-pbrs-005": REPO_ROOT / "pufferlib" / "config" / "ocean" / "candy_crush_ingredient_pbrs_005.ini",
+    "ingredient-pbrs-010": REPO_ROOT / "pufferlib" / "config" / "ocean" / "candy_crush_ingredient_pbrs_010.ini",
+    "ingredient-pbrs-020": REPO_ROOT / "pufferlib" / "config" / "ocean" / "candy_crush_ingredient_pbrs_020.ini",
     "screen-200m": REPO_ROOT / "pufferlib" / "config" / "ocean" / "candy_crush_screen_200m.ini",
     "throughput": REPO_ROOT / "pufferlib" / "config" / "ocean" / "candy_crush_throughput.ini",
 }
 PRESET_ALIASES = {
     "b0-taskdist": "a0-taskdist",
     "b0-campaign": "a0-campaign",
+    "ingredient-pbrs": "ingredient-pbrs-010",
     "screen-short": "screen-200m",
 }
 
@@ -42,6 +46,7 @@ METRIC_KEYS = [
     "successful_swaps",
     "frosting_cleared",
     "ingredient_dropped",
+    "ingredient_progress_dense",
     "jelly_cleared",
     "color_collected",
 ]

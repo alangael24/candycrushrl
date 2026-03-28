@@ -63,6 +63,7 @@ static int my_init(Env* env, PyObject* args, PyObject* kwargs) {
     env->invalid_penalty = unpack(kwargs, "invalid_penalty");
     env->shuffle_penalty = unpack(kwargs, "shuffle_penalty");
     env->progress_reward_scale = unpack(kwargs, "progress_reward_scale");
+    env->ingredient_progress_scale = unpack(kwargs, "ingredient_progress_scale");
     env->shaping_gamma = unpack(kwargs, "shaping_gamma");
     env->success_bonus = unpack(kwargs, "success_bonus");
     env->failure_penalty = unpack(kwargs, "failure_penalty");
@@ -95,6 +96,7 @@ static int my_log(PyObject* dict, Log* log) {
     assign_to_dict(dict, "jelly_cleared", log->jelly_cleared);
     assign_to_dict(dict, "frosting_cleared", log->frosting_cleared);
     assign_to_dict(dict, "ingredient_dropped", log->ingredient_dropped);
+    assign_to_dict(dict, "ingredient_progress_dense", log->ingredient_progress_dense);
     assign_to_dict(dict, "color_collected", log->color_collected);
     assign_to_dict(dict, "goal_progress", log->goal_progress);
     assign_to_dict(dict, "level_wins", log->level_wins);

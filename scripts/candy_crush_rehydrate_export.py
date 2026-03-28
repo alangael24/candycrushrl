@@ -16,11 +16,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PRESET_FILES = {
     "a0-taskdist": REPO_ROOT / "pufferlib" / "config" / "ocean" / "candy_crush_a0_taskdist.ini",
     "a0-campaign": REPO_ROOT / "pufferlib" / "config" / "ocean" / "candy_crush_a0_campaign.ini",
+    "ingredient-pbrs-005": REPO_ROOT / "pufferlib" / "config" / "ocean" / "candy_crush_ingredient_pbrs_005.ini",
+    "ingredient-pbrs-010": REPO_ROOT / "pufferlib" / "config" / "ocean" / "candy_crush_ingredient_pbrs_010.ini",
+    "ingredient-pbrs-020": REPO_ROOT / "pufferlib" / "config" / "ocean" / "candy_crush_ingredient_pbrs_020.ini",
     "throughput": REPO_ROOT / "pufferlib" / "config" / "ocean" / "candy_crush_throughput.ini",
 }
 PRESET_ALIASES = {
     "b0-taskdist": "a0-taskdist",
     "b0-campaign": "a0-campaign",
+    "ingredient-pbrs": "ingredient-pbrs-010",
 }
 
 

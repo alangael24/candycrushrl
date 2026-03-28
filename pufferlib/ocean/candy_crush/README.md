@@ -33,6 +33,9 @@ into the standard PufferLib CLI as `puffer_candy_crush`.
 - Goal-conditioned reward shaping: dense reward uses PBRS on the normalized
   remaining-goal vector, with terminal win/loss terms and an efficiency bonus
   for winning early
+- Optional ingredient-progress PBRS: adds a separate dense term that rewards
+  ingredient pieces moving closer to the bottom exit before they are actually
+  dropped, which is useful for ingredient-specific credit assignment studies
 - Adaptive curriculum: unlocks harder authored levels when the frontier win
   rate crosses a threshold and still replays earlier levels occasionally
 - Task distribution mode: when enabled, resets sample compound goals and move
@@ -66,6 +69,16 @@ python scripts/candy_crush_train_preset.py train \
   --preset a0-taskdist \
   --device cuda \
   --seed 101
+```
+
+For ingredient-progress shaping screens on the fixed 200M protocol, use one of
+the explicit PBRS presets and still evaluate against the same fixed split:
+
+```bash
+python scripts/candy_crush_train_preset.py train --preset ingredient-pbrs-005 --seed 101
+python scripts/candy_crush_train_preset.py train --preset ingredient-pbrs-010 --seed 101
+python scripts/candy_crush_train_preset.py train --preset ingredient-pbrs-020 --seed 101
+python scripts/candy_crush_fixed_eval.py --preset screen-200m --load-model-path /path/to/model.pt
 ```
 
 `B0-taskdist` and `B0-campaign` are evaluation protocols, not new environment

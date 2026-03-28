@@ -26,7 +26,8 @@ typedef enum { EFFECT_ROW, EFFECT_COL, EFFECT_BLAST3, EFFECT_BLAST5, EFFECT_CROS
 typedef struct {
     float score, episode_return, episode_length, total_cleared, invalid_swaps;
     float successful_swaps, total_cascades, max_combo, reshuffles;
-    float jelly_cleared, frosting_cleared, ingredient_dropped, color_collected, goal_progress, level_wins, n;
+    float jelly_cleared, frosting_cleared, ingredient_dropped, ingredient_progress_dense;
+    float color_collected, goal_progress, level_wins, n;
     float level_id, unlocked_level, curriculum_win_rate;
 } Log;
 
@@ -76,6 +77,7 @@ typedef struct {
     float invalid_penalty;
     float shuffle_penalty;
     float progress_reward_scale;
+    float ingredient_progress_scale;
     float shaping_gamma;
     float success_bonus;
     float failure_penalty;
@@ -110,6 +112,7 @@ typedef struct {
     int color_collected[MAX_CANDIES];
     int starter_striped, starter_wrapped, starter_color_bomb, starter_fish;
     float episode_return;
+    float ingredient_progress_dense_episode;
 
     unsigned char board[MAX_BOARD][MAX_BOARD];
     unsigned char jelly[MAX_BOARD][MAX_BOARD];
@@ -321,6 +324,26 @@ static inline float goal_potential(CandyCrush* env) {
         active++;
     }
     return active > 0 ? phi / active : 0.0f;
+}
+
+static inline float ingredient_progress_potential(CandyCrush* env) {
+    const int slot = goal_ingredient_slot(env);
+    const int goal = max_int(0, env->goal_target[slot]);
+    float acc;
+    const float denom_row = (float)max_int(1, env->board_size - 1);
+
+    if (goal <= 0) return 0.0f;
+
+    acc = (float)max_int(0, goal - env->goal_remaining[slot]);
+    for (int row = 0; row < env->board_size; row++) {
+        for (int col = 0; col < env->board_size; col++) {
+            if (cell_special(env->board[row][col]) == SPECIAL_INGREDIENT) {
+                acc += (float)row / denom_row;
+            }
+        }
+    }
+
+    return acc / (float)max_int(1, goal);
 }
 
 static inline bool goal_complete(CandyCrush* env) {
@@ -1350,6 +1373,7 @@ static void reset_episode(CandyCrush* env) {
     memset(env->color_collected, 0, sizeof(env->color_collected));
     clear_goal_vector(env->goal_remaining);
     env->episode_return = 0.0f;
+    env->ingredient_progress_dense_episode = 0.0f;
     clear_board_preserving_blockers(env);
     randomize_layout(env);
     generate_board(env);
@@ -1371,6 +1395,7 @@ static void write_episode_log(CandyCrush* env) {
     env->log.jelly_cleared += env->jelly_cleared;
     env->log.frosting_cleared += env->frosting_cleared;
     env->log.ingredient_dropped += env->ingredients_dropped;
+    env->log.ingredient_progress_dense += env->ingredient_progress_dense_episode;
     env->log.color_collected += total_color_collected(env);
     env->log.goal_progress += 1.0f - goal_remaining_ratio(env);
     env->log.level_wins += env->level_won;
@@ -1406,6 +1431,7 @@ static void init_env(CandyCrush* env) {
     env->task_min_steps = max_int(1, env->task_min_steps);
     env->task_max_steps = max_int(env->task_min_steps, env->task_max_steps);
     if (env->progress_reward_scale < 0.0f) env->progress_reward_scale = 0.0f;
+    if (env->ingredient_progress_scale < 0.0f) env->ingredient_progress_scale = 0.0f;
     if (env->shaping_gamma == 0.0f) env->shaping_gamma = 0.995f;
     env->shaping_gamma = clamp01(env->shaping_gamma);
     if (env->failure_penalty < 0.0f) env->failure_penalty = 0.0f;
@@ -1457,6 +1483,7 @@ static void c_step(CandyCrush* env) {
     int row, col, nrow, ncol, dir;
     ClearStats turn_stats = {0};
     const float phi_before = goal_potential(env);
+    const float phi_ing_before = ingredient_progress_potential(env);
     bool observations_ready = false;
     float reward = 0.0f;
     env->rewards[0] = 0.0f; env->terminals[0] = 0; env->steps++;
@@ -1481,7 +1508,14 @@ static void c_step(CandyCrush* env) {
     }
     {
         const float phi_after = goal_potential(env);
+        const float phi_ing_after = ingredient_progress_potential(env);
         reward += env->progress_reward_scale * (env->shaping_gamma * phi_after - phi_before);
+        if (env->goal_target[goal_ingredient_slot(env)] > 0) {
+            const float ingredient_progress_dense =
+                env->ingredient_progress_scale * (env->shaping_gamma * phi_ing_after - phi_ing_before);
+            reward += ingredient_progress_dense;
+            env->ingredient_progress_dense_episode += ingredient_progress_dense;
+        }
     }
     if (goal_complete(env)) {
         reward += env->success_bonus
