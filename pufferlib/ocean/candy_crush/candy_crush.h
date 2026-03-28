@@ -28,6 +28,8 @@ typedef struct {
     float successful_swaps, total_cascades, max_combo, reshuffles;
     float jelly_cleared, frosting_cleared, ingredient_dropped, color_collected, goal_progress, level_wins, n;
     float level_id, unlocked_level, curriculum_win_rate;
+    float task_active_goals, task_step_budget, sampled_bucket;
+    float task_family_color, task_family_jelly, task_family_frosting, task_family_ingredient, task_family_score;
 } Log;
 
 typedef struct { int kind, row, col, color, count; } Effect;
@@ -67,9 +69,19 @@ typedef struct {
     int task_max_active_goals;
     int task_min_steps;
     int task_max_steps;
+    int task_hard_min_active_goals;
+    int task_hard_max_active_goals;
+    int task_hard_min_blocker_goals;
+    int sampled_bucket;
     int goal_target[MAX_CANDIES + GOAL_EXTRA_SLOTS];
     int goal_remaining[MAX_CANDIES + GOAL_EXTRA_SLOTS];
     int has_goal_vector;
+    float task_mixed_hard_prob;
+    float task_hard_color_weight;
+    float task_hard_jelly_weight;
+    float task_hard_frosting_weight;
+    float task_hard_ingredient_weight;
+    float task_hard_score_weight;
 
     float reward_per_tile;
     float combo_bonus;
@@ -132,6 +144,7 @@ static const char CANDY_SYMBOLS[MAX_CANDIES + 1] = {'.', 'A', 'B', 'C', 'D', 'E'
 static inline int max_int(int a, int b) { return a > b ? a : b; }
 static inline int min_int(int a, int b) { return a < b ? a : b; }
 static inline int clamp_int(int value, int low, int high) { return min_int(high, max_int(low, value)); }
+static inline float max_float(float a, float b) { return a > b ? a : b; }
 static inline bool in_bounds(CandyCrush* env, int row, int col) { return row >= 0 && row < env->board_size && col >= 0 && col < env->board_size; }
 static inline unsigned char make_cell(int color, SpecialType special) { return (unsigned char)(((int)special << TYPE_SHIFT) | (color & COLOR_MASK)); }
 static inline int cell_color(unsigned char cell) { return cell & COLOR_MASK; }
@@ -226,6 +239,99 @@ static inline void copy_goal_vector(
     const int src[MAX_CANDIES + GOAL_EXTRA_SLOTS]
 ) {
     memcpy(dst, src, sizeof(int) * (MAX_CANDIES + GOAL_EXTRA_SLOTS));
+}
+
+static inline int active_goal_count(CandyCrush* env) {
+    int count = 0;
+    for (int i = 0; i < goal_slot_count(env); i++) {
+        if (env->goal_target[i] != 0) count++;
+    }
+    return count;
+}
+
+static inline bool has_color_goal(CandyCrush* env) {
+    for (int i = 0; i < env->num_candies; i++) {
+        if (env->goal_target[i] != 0) return true;
+    }
+    return false;
+}
+
+static inline bool has_special_goal(CandyCrush* env, int slot) {
+    return slot >= 0 && slot < goal_slot_count(env) && env->goal_target[slot] != 0;
+}
+
+static inline bool is_blocker_goal_slot(CandyCrush* env, int slot) {
+    return slot == goal_frosting_slot(env) || slot == goal_ingredient_slot(env);
+}
+
+static inline float hard_goal_slot_weight(CandyCrush* env, int slot) {
+    if (slot < env->num_candies) return env->task_hard_color_weight / max_int(1, env->num_candies);
+    if (slot == goal_jelly_slot(env)) return env->task_hard_jelly_weight;
+    if (slot == goal_frosting_slot(env)) return env->task_hard_frosting_weight;
+    if (slot == goal_ingredient_slot(env)) return env->task_hard_ingredient_weight;
+    if (slot == goal_score_slot(env)) return env->task_hard_score_weight;
+    return 0.0f;
+}
+
+static int sample_hard_goal_slot_index(
+    CandyCrush* env,
+    const int goal_slots[MAX_CANDIES + GOAL_EXTRA_SLOTS],
+    const bool selected[MAX_CANDIES + GOAL_EXTRA_SLOTS],
+    int total_goal_slots,
+    bool blocker_only
+) {
+    int candidates[MAX_CANDIES + GOAL_EXTRA_SLOTS];
+    int candidate_count = 0;
+    float total_weight = 0.0f;
+
+    for (int i = 0; i < total_goal_slots; i++) {
+        const int slot = goal_slots[i];
+        const float weight = max_float(0.0f, hard_goal_slot_weight(env, slot));
+        if (selected[i]) continue;
+        if (blocker_only && !is_blocker_goal_slot(env, slot)) continue;
+        candidates[candidate_count++] = i;
+        total_weight += weight;
+    }
+
+    if (candidate_count == 0) return -1;
+    if (total_weight <= 0.0f) return candidates[rng_int_bounded(env, candidate_count)];
+
+    {
+        float target = rng_unit_float(env) * total_weight;
+        float cumulative = 0.0f;
+        for (int j = 0; j < candidate_count; j++) {
+            const int idx = candidates[j];
+            cumulative += max_float(0.0f, hard_goal_slot_weight(env, goal_slots[idx]));
+            if (target <= cumulative || j == candidate_count - 1) return idx;
+        }
+    }
+
+    return candidates[candidate_count - 1];
+}
+
+static void activate_goal_slot(CandyCrush* env, int slot) {
+    const int jelly_slot = goal_jelly_slot(env);
+    const int frosting_slot = goal_frosting_slot(env);
+    const int ingredient_slot = goal_ingredient_slot(env);
+    const int score_slot = goal_score_slot(env);
+
+    if (slot < env->num_candies) {
+        const int color_min = max_int(6, env->max_steps / 3);
+        const int color_max = max_int(color_min, env->max_steps);
+        env->goal_target[slot] = rand_int_range(env, color_min, color_max);
+    } else if (slot == jelly_slot) {
+        env->goal_target[jelly_slot] = GOAL_AUTO;
+        env->jelly_density = rand_float_range(env, 0.12f, 0.42f);
+    } else if (slot == frosting_slot) {
+        env->goal_target[frosting_slot] = GOAL_AUTO;
+        env->frosting_density = rand_float_range(env, 0.08f, 0.20f);
+        env->frosting_layers = rand_int_range(env, 1, 2);
+    } else if (slot == ingredient_slot) {
+        env->goal_target[ingredient_slot] = rand_int_range(env, 1, min_int(2, env->board_size));
+        env->ingredient_spawn_rows = rand_int_range(env, 1, min_int(2, env->board_size));
+    } else if (slot == score_slot) {
+        env->goal_target[score_slot] = rand_int_range(env, env->max_steps * 2, env->max_steps * 5);
+    }
 }
 
 static inline void add_goal_event(CandyCrush* env, ClearStats* stats, int slot, int amount) {
@@ -473,7 +579,7 @@ static void apply_level_profile(CandyCrush* env, int level) {
     }
 }
 
-static void sample_task_distribution(CandyCrush* env) {
+static void sample_task_distribution_normal(CandyCrush* env) {
     int goal_slots[MAX_CANDIES + GOAL_EXTRA_SLOTS];
     const int jelly_slot = goal_jelly_slot(env);
     const int frosting_slot = goal_frosting_slot(env);
@@ -485,6 +591,7 @@ static void sample_task_distribution(CandyCrush* env) {
     restore_base_profile(env);
     clear_goal_vector(env->goal_target);
     env->active_level = -1;
+    env->sampled_bucket = 0;
 
     env->task_min_steps = max_int(1, env->task_min_steps);
     env->task_max_steps = max_int(env->task_min_steps, env->task_max_steps);
@@ -533,6 +640,69 @@ static void sample_task_distribution(CandyCrush* env) {
     }
 
     env->max_steps += 4 * max_int(0, active_goals - 1);
+}
+
+static void sample_task_distribution_hard(CandyCrush* env) {
+    int goal_slots[MAX_CANDIES + GOAL_EXTRA_SLOTS];
+    const int total_goal_slots = goal_slot_count(env);
+    bool selected[MAX_CANDIES + GOAL_EXTRA_SLOTS] = {0};
+    int active_goals;
+    int required_blocker_goals;
+    int chosen_goals = 0;
+
+    restore_base_profile(env);
+    clear_goal_vector(env->goal_target);
+    env->active_level = -1;
+    env->sampled_bucket = 1;
+
+    env->task_min_steps = max_int(1, env->task_min_steps);
+    env->task_max_steps = max_int(env->task_min_steps, env->task_max_steps);
+    env->max_steps = rand_int_range(env, env->task_min_steps, env->task_max_steps);
+
+    env->jelly_density = 0.0f;
+    env->frosting_density = rand_float_range(env, 0.0f, 0.12f);
+    env->frosting_layers = rand_int_range(env, 1, max_int(1, env->base_frosting_layers));
+    env->ingredient_spawn_rows = rand_int_range(env, 1, min_int(2, env->board_size));
+    env->starter_striped = rand_int_range(env, 0, 1);
+    env->starter_wrapped = rand_int_range(env, 0, 1);
+    env->starter_color_bomb = rand_int_range(env, 0, 5) == 0;
+    env->starter_fish = rand_int_range(env, 0, 4) == 0;
+
+    active_goals = rand_int_range(env, env->task_hard_min_active_goals, env->task_hard_max_active_goals);
+    for (int i = 0; i < total_goal_slots; i++) goal_slots[i] = i;
+    for (int i = 0; i < total_goal_slots; i++) {
+        const int pick = rand_int_range(env, i, total_goal_slots - 1);
+        const int tmp = goal_slots[i];
+        goal_slots[i] = goal_slots[pick];
+        goal_slots[pick] = tmp;
+    }
+
+    required_blocker_goals = clamp_int(env->task_hard_min_blocker_goals, 0, min_int(active_goals, 2));
+    for (int count = 0; count < required_blocker_goals; count++) {
+        const int idx = sample_hard_goal_slot_index(env, goal_slots, selected, total_goal_slots, true);
+        if (idx < 0) break;
+        selected[idx] = true;
+        activate_goal_slot(env, goal_slots[idx]);
+        chosen_goals++;
+    }
+
+    while (chosen_goals < active_goals) {
+        const int idx = sample_hard_goal_slot_index(env, goal_slots, selected, total_goal_slots, false);
+        if (idx < 0) break;
+        selected[idx] = true;
+        activate_goal_slot(env, goal_slots[idx]);
+        chosen_goals++;
+    }
+
+    env->max_steps += 4 * max_int(0, active_goals - 1);
+}
+
+static void sample_task_distribution(CandyCrush* env) {
+    if (env->task_distribution_mode == 2 && rng_unit_float(env) < env->task_mixed_hard_prob) {
+        sample_task_distribution_hard(env);
+        return;
+    }
+    sample_task_distribution_normal(env);
 }
 
 static int select_active_level(CandyCrush* env) {
@@ -1377,6 +1547,14 @@ static void write_episode_log(CandyCrush* env) {
     env->log.level_id += env->active_level >= 0 ? env->active_level : 0.0f;
     env->log.unlocked_level += env->unlocked_level;
     env->log.curriculum_win_rate += curriculum_win_rate(env);
+    env->log.task_active_goals += active_goal_count(env);
+    env->log.task_step_budget += env->max_steps;
+    env->log.sampled_bucket += env->sampled_bucket;
+    env->log.task_family_color += has_color_goal(env) ? 1.0f : 0.0f;
+    env->log.task_family_jelly += has_special_goal(env, goal_jelly_slot(env)) ? 1.0f : 0.0f;
+    env->log.task_family_frosting += has_special_goal(env, goal_frosting_slot(env)) ? 1.0f : 0.0f;
+    env->log.task_family_ingredient += has_special_goal(env, goal_ingredient_slot(env)) ? 1.0f : 0.0f;
+    env->log.task_family_score += has_special_goal(env, goal_score_slot(env)) ? 1.0f : 0.0f;
     env->log.n += 1.0f;
 }
 
@@ -1400,11 +1578,28 @@ static void init_env(CandyCrush* env) {
     if (env->max_steps < 1) { fprintf(stderr, "candy_crush: max_steps must be >= 1\n"); exit(1); }
     if (env->frosting_layers < 1) env->frosting_layers = 1;
     if (env->ingredient_spawn_rows < 1) env->ingredient_spawn_rows = 1;
-    env->task_distribution_mode = env->task_distribution_mode != 0;
+    env->task_distribution_mode = clamp_int(env->task_distribution_mode, 0, 2);
     env->task_min_active_goals = clamp_int(max_int(1, env->task_min_active_goals), 1, goal_slot_count(env));
     env->task_max_active_goals = clamp_int(max_int(env->task_min_active_goals, env->task_max_active_goals), env->task_min_active_goals, goal_slot_count(env));
     env->task_min_steps = max_int(1, env->task_min_steps);
     env->task_max_steps = max_int(env->task_min_steps, env->task_max_steps);
+    env->task_mixed_hard_prob = clamp01(env->task_mixed_hard_prob > 0.0f ? env->task_mixed_hard_prob : 0.35f);
+    env->task_hard_min_active_goals = clamp_int(
+        max_int(1, env->task_hard_min_active_goals > 0 ? env->task_hard_min_active_goals : 3),
+        1,
+        goal_slot_count(env)
+    );
+    env->task_hard_max_active_goals = clamp_int(
+        max_int(env->task_hard_min_active_goals, env->task_hard_max_active_goals > 0 ? env->task_hard_max_active_goals : env->task_hard_min_active_goals),
+        env->task_hard_min_active_goals,
+        goal_slot_count(env)
+    );
+    env->task_hard_min_blocker_goals = clamp_int(env->task_hard_min_blocker_goals, 0, 2);
+    env->task_hard_color_weight = max_float(0.0f, env->task_hard_color_weight > 0.0f ? env->task_hard_color_weight : 1.0f);
+    env->task_hard_jelly_weight = max_float(0.0f, env->task_hard_jelly_weight > 0.0f ? env->task_hard_jelly_weight : 1.0f);
+    env->task_hard_frosting_weight = max_float(0.0f, env->task_hard_frosting_weight > 0.0f ? env->task_hard_frosting_weight : 2.5f);
+    env->task_hard_ingredient_weight = max_float(0.0f, env->task_hard_ingredient_weight > 0.0f ? env->task_hard_ingredient_weight : 2.5f);
+    env->task_hard_score_weight = max_float(0.0f, env->task_hard_score_weight > 0.0f ? env->task_hard_score_weight : 0.75f);
     if (env->progress_reward_scale < 0.0f) env->progress_reward_scale = 0.0f;
     if (env->shaping_gamma == 0.0f) env->shaping_gamma = 0.995f;
     env->shaping_gamma = clamp01(env->shaping_gamma);

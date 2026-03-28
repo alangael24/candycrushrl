@@ -98,6 +98,10 @@ Useful curriculum knobs in `candy_crush.ini` or CLI env overrides:
   task sampling treats each color slot independently, so compound goals like
   `[red, green, blue, yellow, purple, teal, jelly, frosting, ingredient, score]
   = [10, 0, 10, 0, 0, 0, 0, 20, 0, 0]` can be generated automatically
+- `task_distribution_mode = 2` enables a mixed sampler that keeps the normal
+  task distribution for most episodes while routing a configurable fraction
+  through a harder bucket with more `3-goal`, `frosting`, and `ingredient`
+  tasks
 - `progress_reward_scale`, `shaping_gamma`, `success_bonus`,
   `failure_penalty`, and `efficiency_bonus` control the goal-aligned reward
 
@@ -109,6 +113,9 @@ The repo now ships three explicit Candy Crush configs:
   `A0` learning regime, `task_distribution_mode = 1`, `curriculum_mode = 0`
 - `pufferlib/config/ocean/candy_crush_a0_campaign.ini`
   `A0` learning regime, `task_distribution_mode = 0`, `curriculum_mode = 1`
+- `pufferlib/config/ocean/candy_crush_mixed_hard_ft.ini`
+  200M fine-tune preset with `task_distribution_mode = 2`, `65/35` normal/hard
+  sampling, and the same `128 x 16` host geometry as the frozen screen protocol
 - `pufferlib/config/ocean/candy_crush_throughput.ini`
   throughput-oriented stress test, not the preferred learning baseline
 
@@ -120,6 +127,22 @@ python scripts/candy_crush_train_preset.py train \
   --device cuda \
   --env-num-envs 128 \
   --vec-num-envs 16
+```
+
+Fine-tune the best MLP checkpoint against the mixed sampler like this:
+
+```bash
+python scripts/candy_crush_train_preset.py train \
+  --preset mixed-hard-ft \
+  --device cuda \
+  --seed 101 \
+  --load-model-path /path/to/model.pt
+
+python scripts/candy_crush_fixed_eval.py \
+  --preset screen-200m \
+  --device cpu \
+  --load-model-path /path/to/fine_tuned_model.pt \
+  --json-out artifacts/candy_crush_fixed_eval.json
 ```
 
 ## Guardrails

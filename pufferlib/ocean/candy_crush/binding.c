@@ -58,6 +58,15 @@ static int my_init(Env* env, PyObject* args, PyObject* kwargs) {
     env->task_max_active_goals = unpack(kwargs, "task_max_active_goals");
     env->task_min_steps = unpack(kwargs, "task_min_steps");
     env->task_max_steps = unpack(kwargs, "task_max_steps");
+    env->task_hard_min_active_goals = unpack(kwargs, "task_hard_min_active_goals");
+    env->task_hard_max_active_goals = unpack(kwargs, "task_hard_max_active_goals");
+    env->task_hard_min_blocker_goals = unpack(kwargs, "task_hard_min_blocker_goals");
+    env->task_mixed_hard_prob = unpack(kwargs, "task_mixed_hard_prob");
+    env->task_hard_color_weight = unpack(kwargs, "task_hard_color_weight");
+    env->task_hard_jelly_weight = unpack(kwargs, "task_hard_jelly_weight");
+    env->task_hard_frosting_weight = unpack(kwargs, "task_hard_frosting_weight");
+    env->task_hard_ingredient_weight = unpack(kwargs, "task_hard_ingredient_weight");
+    env->task_hard_score_weight = unpack(kwargs, "task_hard_score_weight");
     env->reward_per_tile = unpack(kwargs, "reward_per_tile");
     env->combo_bonus = unpack(kwargs, "combo_bonus");
     env->invalid_penalty = unpack(kwargs, "invalid_penalty");
@@ -101,5 +110,13 @@ static int my_log(PyObject* dict, Log* log) {
     assign_to_dict(dict, "level_id", log->level_id);
     assign_to_dict(dict, "unlocked_level", log->unlocked_level);
     assign_to_dict(dict, "curriculum_win_rate", log->curriculum_win_rate);
+    assign_to_dict(dict, "task_active_goals", log->task_active_goals);
+    assign_to_dict(dict, "task_step_budget", log->task_step_budget);
+    assign_to_dict(dict, "sampled_bucket", log->sampled_bucket);
+    assign_to_dict(dict, "task_family_color", log->task_family_color);
+    assign_to_dict(dict, "task_family_jelly", log->task_family_jelly);
+    assign_to_dict(dict, "task_family_frosting", log->task_family_frosting);
+    assign_to_dict(dict, "task_family_ingredient", log->task_family_ingredient);
+    assign_to_dict(dict, "task_family_score", log->task_family_score);
     return 0;
 }
