@@ -230,6 +230,12 @@ if [ -z "$OBS_TENSOR_T" ]; then
     echo "Error: Could not find OBS_TENSOR_T in $BINDING_SRC"
     exit 1
 fi
+ACTION_MASK_OFFSET=$(awk '/^#define ACTION_MASK_OFFSET/{print $3}' "$BINDING_SRC")
+ACTION_MASK_SIZE=$(awk '/^#define ACTION_MASK_SIZE/{print $3}' "$BINDING_SRC")
+ACTION_MASK_DEFS=()
+if [ -n "$ACTION_MASK_OFFSET" ] && [ -n "$ACTION_MASK_SIZE" ]; then
+    ACTION_MASK_DEFS=(-DACTION_MASK_OFFSET=$ACTION_MASK_OFFSET -DACTION_MASK_SIZE=$ACTION_MASK_SIZE)
+fi
 
 if [ -z "$MODE" ]; then
     echo "Compiling CUDA ($ARCH) training backend..."
@@ -244,6 +250,7 @@ if [ -z "$MODE" ]; then
         -Xcompiler=-fopenmp \
         -DOBS_TENSOR_T=$OBS_TENSOR_T \
         -DENV_NAME=$ENV \
+        "${ACTION_MASK_DEFS[@]}" \
         $PRECISION $NVCC_OPT \
         src/bindings.cu -o build/bindings.o
 
@@ -269,6 +276,7 @@ elif [ "$MODE" = "cpu" ]; then
         -I$PYTHON_INCLUDE -I$PYBIND_INCLUDE \
         -DOBS_TENSOR_T=$OBS_TENSOR_T \
         -DENV_NAME=$ENV \
+        "${ACTION_MASK_DEFS[@]}" \
         $PRECISION $LINK_OPT \
         src/bindings_cpu.cpp -o build/bindings_cpu.o
     LINK_CMD=(
@@ -288,6 +296,7 @@ elif [ "$MODE" = "profile" ]; then
         -I$CUDA_HOME/include $CUDNN_IFLAG -I$RAYLIB_NAME/include \
         -DOBS_TENSOR_T=$OBS_TENSOR_T \
         -DENV_NAME=$ENV \
+        "${ACTION_MASK_DEFS[@]}" \
         -Xcompiler=-DPLATFORM_DESKTOP \
         $PRECISION \
         -Xcompiler=-fopenmp \

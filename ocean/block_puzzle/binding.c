@@ -4,6 +4,8 @@
 #define NUM_ATNS 1
 #define ACT_SIZES {ACTION_COUNT}
 #define OBS_TENSOR_T ByteTensor
+#define ACTION_MASK_OFFSET 178
+#define ACTION_MASK_SIZE 1200
 
 #define Env BlockPuzzle
 #include "vecenv.h"

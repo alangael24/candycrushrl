@@ -10,6 +10,20 @@
 #include "muon.cu"
 #include "vecenv.h"
 
+#ifndef ACTION_MASK_OFFSET
+#define ACTION_MASK_OFFSET -1
+#endif
+
+#ifndef ACTION_MASK_SIZE
+#define ACTION_MASK_SIZE 0
+#endif
+
+#if ACTION_MASK_OFFSET >= 0 && ACTION_MASK_SIZE > 0
+#define HAS_ACTION_MASK 1
+#else
+#define HAS_ACTION_MASK 0
+#endif
+
 static double wall_clock() {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
@@ -141,6 +155,7 @@ struct PPOKernelArgs {
     float* grad_logstd; // For continuous actions
     float* grad_values_pred;
     const precision_t* logits;
+    const precision_t* observations;
     const precision_t* logstd; // Continuous only
     const precision_t* values_pred;
     const float* adv_mean;
@@ -150,6 +165,7 @@ struct PPOKernelArgs {
     float clip_coef, vf_clip_coef, vf_coef, ent_coef;
     int T_seq, A_total, N;
     int logits_stride_n, logits_stride_t, logits_stride_a;
+    int obs_stride_n, obs_stride_t;
     int values_stride_n, values_stride_t;
     bool is_continuous;
 };
@@ -371,11 +387,35 @@ __device__ __forceinline__ float safe_logit(const precision_t* logits,
     return l;
 }
 
+__device__ __forceinline__ float safe_strided_logit(const precision_t* logits,
+        int logits_base, int logits_stride_a, int logits_offset, int offset) {
+    float l = to_float(logits[logits_base + (logits_offset + offset) * logits_stride_a]);
+    if (isnan(l)) {
+        l = 0.0f;
+    }
+    if (isinf(l)) {
+        l = (l > 0) ? 3.4028e+38f : -3.4028e+38f;
+    }
+    return l;
+}
+
+__device__ __forceinline__ bool action_mask_allows(
+        const precision_t* observations, int obs_base, int action_idx, bool use_mask) {
+#if HAS_ACTION_MASK
+    if (use_mask && observations != nullptr
+            && action_idx >= 0 && action_idx < ACTION_MASK_SIZE) {
+        return to_float(observations[obs_base + ACTION_MASK_OFFSET + action_idx]) > 0.5f;
+    }
+#endif
+    return true;
+}
+
 // Expects action logits and values to be in the same contiguous buffer. See default decoder
 __global__ void sample_logits(
         PrecisionTensor dec_out,              // (B, logits_dim + 1 for values)
         PrecisionTensor logstd_puf,           // (1, od) - continuous actions only
         IntTensor act_sizes_puf,              // (num_atns,) action head sizes
+        PrecisionTensor obs_puf,              // (B, obs_size)
         precision_t* __restrict__ actions,    // (B, num_atns)
         precision_t* __restrict__ logprobs,   // (B,)
         precision_t* __restrict__ value_out,  // (B,)
@@ -385,8 +425,10 @@ __global__ void sample_logits(
     int num_atns = numel(act_sizes_puf.shape);
     const int* act_sizes = act_sizes_puf.data;
     const precision_t* logits = dec_out.data;
+    const precision_t* observations = obs_puf.data;
     int logits_stride = fused_cols;
     int value_stride = fused_cols;
+    int obs_stride = numel(obs_puf.shape) >= 2 ? obs_puf.shape[1] : 0;
     bool is_continuous = logstd_puf.data != nullptr && numel(logstd_puf.shape) > 0;
     const precision_t* logstd = logstd_puf.data;
     int logstd_stride = is_continuous ? 0 : 0;  // 1D broadcast: stride 0
@@ -401,6 +443,7 @@ __global__ void sample_logits(
     curandStatePhilox4_32_10_t state = rng_states[idx];
 
     int logits_base = idx * logits_stride;
+    int obs_base = idx * obs_stride;
     float total_log_prob = 0.0f;
 
     if (is_continuous) {
@@ -430,17 +473,36 @@ __global__ void sample_logits(
 
         for (int h = 0; h < num_atns; ++h) {
             int A = act_sizes[h];  // size of this action head
+            bool use_mask = HAS_ACTION_MASK && observations != nullptr;
 
             // Step 1: Find max and sum for numerical stability (with nan_to_num)
             float max_val = -INFINITY;
             float sum_exp = 0.0f;
+            bool found_valid = false;
             for (int a = 0; a < A; ++a) {
+                if (!action_mask_allows(observations, obs_base, logits_offset + a, use_mask)) {
+                    continue;
+                }
                 float l = safe_logit(logits, logits_base, logits_offset, a);
                 if (l > max_val) {
                     sum_exp *= expf(max_val - l);
                     max_val = l;
                 }
                 sum_exp += expf(l - max_val);
+                found_valid = true;
+            }
+            if (!found_valid) {
+                use_mask = false;
+                max_val = -INFINITY;
+                sum_exp = 0.0f;
+                for (int a = 0; a < A; ++a) {
+                    float l = safe_logit(logits, logits_base, logits_offset, a);
+                    if (l > max_val) {
+                        sum_exp *= expf(max_val - l);
+                        max_val = l;
+                    }
+                    sum_exp += expf(l - max_val);
+                }
             }
             float logsumexp = max_val + logf(sum_exp);
 
@@ -449,9 +511,13 @@ __global__ void sample_logits(
 
             // Step 4: Multinomial sampling using inverse CDF
             float cumsum = 0.0f;
-            int sampled_action = A - 1;  // default to last action
+            int sampled_action = -1;
 
             for (int a = 0; a < A; ++a) {
+                if (!action_mask_allows(observations, obs_base, logits_offset + a, use_mask)) {
+                    continue;
+                }
+                sampled_action = a;
                 float l = safe_logit(logits, logits_base, logits_offset, a);
                 float prob = expf(l - logsumexp);
                 cumsum += prob;
@@ -541,7 +607,7 @@ extern "C" void net_callback_wrapper(void* ctx, int buf, int t) {
     }
 
     sample_logits<<<grid_size(block_size), BLOCK_SIZE, 0, stream>>>(
-        dec_puf, p_logstd, pufferl->act_sizes_puf,
+        dec_puf, p_logstd, pufferl->act_sizes_puf, obs_dst,
         act_slice.data, lp_slice.data, val_slice.data,
         pufferl->rng_states[buf]);
 
@@ -563,33 +629,65 @@ extern "C" void net_callback_wrapper(void* ctx, int buf, int t) {
 
 __device__ __forceinline__ void ppo_discrete_head(
         const precision_t* __restrict__ logits, int logits_base,
-        int logits_stride_a, int logits_offset, int A, int act,
+        int logits_stride_a, const precision_t* __restrict__ observations,
+        int obs_base, int logits_offset, int A, int act, int* out_use_mask,
         float* out_logsumexp, float* out_entropy, float* out_logp) {
+    bool use_mask = HAS_ACTION_MASK && observations != nullptr;
     float max_logit = -INFINITY;
     float sum = 0.0f;
     float act_logit = 0.0f;
+    bool found_valid = false;
+    bool act_valid = false;
 
     for (int a = 0; a < A; ++a) {
-        float l = to_float(logits[logits_base + (logits_offset + a) * logits_stride_a]);
+        if (!action_mask_allows(observations, obs_base, logits_offset + a, use_mask)) {
+            continue;
+        }
+        float l = safe_strided_logit(logits, logits_base, logits_stride_a, logits_offset, a);
         if (a == act) {
             act_logit = l;
+            act_valid = true;
         }
         if (l > max_logit) {
             sum *= __expf(max_logit - l);
             max_logit = l;
         }
         sum += __expf(l - max_logit);
+        found_valid = true;
     }
+
+    if (!found_valid || !act_valid) {
+        use_mask = false;
+        max_logit = -INFINITY;
+        sum = 0.0f;
+        act_logit = 0.0f;
+        for (int a = 0; a < A; ++a) {
+            float l = safe_strided_logit(logits, logits_base, logits_stride_a, logits_offset, a);
+            if (a == act) {
+                act_logit = l;
+            }
+            if (l > max_logit) {
+                sum *= __expf(max_logit - l);
+                max_logit = l;
+            }
+            sum += __expf(l - max_logit);
+        }
+    }
+
     float logsumexp = max_logit + __logf(sum);
 
     float ent = 0.0f;
     for (int a = 0; a < A; ++a) {
-        float l = to_float(logits[logits_base + (logits_offset + a) * logits_stride_a]);
+        if (!action_mask_allows(observations, obs_base, logits_offset + a, use_mask)) {
+            continue;
+        }
+        float l = safe_strided_logit(logits, logits_base, logits_stride_a, logits_offset, a);
         float logp = l - logsumexp;
         float p = __expf(logp);
         ent -= p * logp;
     }
 
+    *out_use_mask = use_mask ? 1 : 0;
     *out_logsumexp = logsumexp;
     *out_entropy = ent;
     *out_logp = act_logit - logsumexp;
@@ -629,6 +727,7 @@ __global__ void ppo_loss_compute(
     int nt = n * a.T_seq + t;
 
     int logits_base = n * a.logits_stride_n + t * a.logits_stride_t;
+    int obs_base = n * a.obs_stride_n + t * a.obs_stride_t;
     int values_idx = n * a.values_stride_n + t * a.values_stride_t;
     int grad_logits_base = nt * a.A_total;
 
@@ -680,6 +779,7 @@ __global__ void ppo_loss_compute(
     float head_logsumexp[MAX_ATN_HEADS];
     float head_entropy[MAX_ATN_HEADS];
     int head_act[MAX_ATN_HEADS];
+    int head_use_mask[MAX_ATN_HEADS];
 
     if (!a.is_continuous) {
         int logits_offset = 0;
@@ -687,10 +787,13 @@ __global__ void ppo_loss_compute(
             int A = a.act_sizes[h];
             int act = static_cast<int>(g.actions[nt * a.num_atns + h]);
             head_act[h] = act;
+            int use_mask;
             float lse, ent, lp;
-            ppo_discrete_head(a.logits, logits_base, a.logits_stride_a, logits_offset, A, act, &lse, &ent, &lp);
+            ppo_discrete_head(a.logits, logits_base, a.logits_stride_a,
+                a.observations, obs_base, logits_offset, A, act, &use_mask, &lse, &ent, &lp);
             head_logsumexp[h] = lse;
             head_entropy[h] = ent;
+            head_use_mask[h] = use_mask;
             total_log_prob += lp;
             total_entropy += ent;
             logits_offset += A;
@@ -730,11 +833,16 @@ __global__ void ppo_loss_compute(
         for (int h = 0; h < a.num_atns; ++h) {
             int A = a.act_sizes[h];
             int act = head_act[h];
+            bool use_mask = head_use_mask[h] != 0;
             float logsumexp = head_logsumexp[h];
             float ent = head_entropy[h];
 
             for (int j = 0; j < A; ++j) {
-                float l = to_float(a.logits[logits_base + (logits_offset + j) * a.logits_stride_a]);
+                if (!action_mask_allows(a.observations, obs_base, logits_offset + j, use_mask)) {
+                    a.grad_logits[grad_logits_base + logits_offset + j] = 0.0f;
+                    continue;
+                }
+                float l = safe_strided_logit(a.logits, logits_base, a.logits_stride_a, logits_offset, j);
                 float logp = l - logsumexp;
                 float p = __expf(logp);
                 float d_logit = (j == act) ? d_new_logp : 0.0f;
@@ -910,6 +1018,7 @@ void ppo_loss_fwd_bwd(
         .grad_logstd = is_continuous ? bufs.grad_logstd.data : nullptr,
         .grad_values_pred = bufs.grad_values.data,
         .logits = logits_ptr,
+        .observations = graph.mb_obs.data,
         .logstd = is_continuous ? logstd.data : nullptr,
         .values_pred = logits_ptr + A_total,
         .adv_mean = adv_mean_ptr,
@@ -920,6 +1029,7 @@ void ppo_loss_fwd_bwd(
         .vf_coef = vf_coef, .ent_coef = ent_coef,
         .T_seq = T, .A_total = A_total, .N = N,
         .logits_stride_n = T * fused_cols, .logits_stride_t = fused_cols, .logits_stride_a = 1,
+        .obs_stride_n = T * graph.mb_obs.shape[2], .obs_stride_t = graph.mb_obs.shape[2],
         .values_stride_n = T * fused_cols, .values_stride_t = fused_cols,
         .is_continuous = is_continuous,
     };
