@@ -245,7 +245,10 @@ def _train(env_name, args, sweep_obj=None, result_queue=None, verbose=False):
             continue
 
         logs = backend.eval_log(pufferl) if epoch >= train_epochs else backend.log(pufferl)
-        flat_logs = {**flat_logs, **dict(unroll_nested_dict(logs))}
+        new_logs = dict(unroll_nested_dict(logs))
+        if 'env/n' not in new_logs:
+            new_logs['env/n'] = 0
+        flat_logs = {**flat_logs, **new_logs}
 
         if verbose:
             print_dashboard(args, model_size, flat_logs)
