@@ -190,6 +190,49 @@ fi
 if [ -z "$CUDNN_LFLAG" ]; then
     CUDNN_LFLAG=$(python -c "import nvidia.cudnn, os; print('-L' + os.path.join(nvidia.cudnn.__path__[0], 'lib'))" 2>/dev/null || echo "")
 fi
+if [ -z "$CUDNN_IFLAG" ] || [ -z "$CUDNN_LFLAG" ]; then
+    CUDNN_SITE=$(python - <<'PY' 2>/dev/null || echo ""
+import glob
+import site
+
+roots = []
+for getter in (getattr(site, "getsitepackages", None), getattr(site, "getusersitepackages", None)):
+    if getter is None:
+        continue
+    try:
+        paths = getter()
+        if isinstance(paths, str):
+            paths = [paths]
+        roots.extend(paths)
+    except Exception:
+        pass
+
+patterns = []
+for root in roots:
+    patterns.append(root + "/nvidia/cudnn")
+patterns.extend([
+    "/usr/local/lib/python*/dist-packages/nvidia/cudnn",
+    "/usr/local/lib/python*/site-packages/nvidia/cudnn",
+    "/usr/lib/python*/dist-packages/nvidia/cudnn",
+    "/usr/lib/python*/site-packages/nvidia/cudnn",
+])
+
+for pattern in patterns:
+    matches = sorted(glob.glob(pattern))
+    if matches:
+        print(matches[0])
+        break
+PY
+)
+    if [ -n "$CUDNN_SITE" ]; then
+        if [ -z "$CUDNN_IFLAG" ] && [ -d "$CUDNN_SITE/include" ]; then
+            CUDNN_IFLAG="-I$CUDNN_SITE/include"
+        fi
+        if [ -z "$CUDNN_LFLAG" ] && [ -d "$CUDNN_SITE/lib" ]; then
+            CUDNN_LFLAG="-L$CUDNN_SITE/lib"
+        fi
+    fi
+fi
 
 export CCACHE_DIR="${CCACHE_DIR:-$HOME/.ccache}"
 export CCACHE_BASEDIR="$(pwd)"
