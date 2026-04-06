@@ -141,6 +141,7 @@ MAKE_FUNCTIONS = {
     'pysquared': 'PySquared',
     'connect4': 'Connect4',
     'candy_crush': 'CandyCrush',
+    'block_puzzle': 'BlockPuzzle',
     'g2048': 'G2048',
     'terraform': 'Terraform',
     'template': 'Template',

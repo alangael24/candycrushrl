@@ -70,6 +70,27 @@ class CandyCrush(nn.Module):
         return logits, values
 
 
+class BlockPuzzle(CandyCrush):
+    def encode_observations(self, observations, state=None):
+        observations = observations.view(observations.shape[0], -1).float()
+        features = observations[:, :self.feature_dim] / 255.0
+        action_mask = observations[:, self.feature_dim:] > 0
+        missing = ~action_mask.any(dim=1)
+        if missing.any():
+            missing_count = int(missing.sum().item())
+            batch_size = int(observations.shape[0])
+            raise RuntimeError(
+                'BlockPuzzle action mask is empty for '
+                f'{missing_count}/{batch_size} observations. '
+                'This usually means the C extension and Python observation '
+                'shape are out of sync. Rebuild the environment with '
+                '`python -m pip install -e . --no-build-isolation` and '
+                '`python setup.py build_ext --inplace --force`.'
+            )
+        self.action_mask = action_mask
+        return self.encoder(features)
+
+
 class Boids(nn.Module):
     def __init__(self, env, cnn_channels=32, hidden_size=128, **kwargs):
         super().__init__()
