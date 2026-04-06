@@ -141,6 +141,9 @@ def print_dashboard(args, model_size, flat_logs, clear=False, idx=[0],
     right.add_column(f"{c1}Value", justify="right", width=10)
 
     i = 0
+    if 'env/n' in flat_logs:
+        left.add_row(f'{b2}n (episodes)', f'{b2}{int(flat_logs["env/n"])}')
+        i += 1
     for k, v in flat_logs.items():
         if k.startswith('env/') and k != 'env/n':
             u = left if i % 2 == 0 else right
