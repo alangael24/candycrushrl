@@ -3,6 +3,14 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#ifndef ACTION_MASK_OFFSET
+#define ACTION_MASK_OFFSET -1
+#endif
+
+#ifndef ACTION_MASK_SIZE
+#define ACTION_MASK_SIZE 0
+#endif
+
 #define _PUFFER_STRINGIFY(x) #x
 #define PUFFER_STRINGIFY(x) _PUFFER_STRINGIFY(x)
 #include <cstring>
@@ -164,6 +172,8 @@ PYBIND11_MODULE(_C, m) {
     m.attr("precision_bytes") = 4;
     m.attr("env_name") = PUFFER_STRINGIFY(ENV_NAME);
     m.attr("gpu") = 0;
+    m.attr("action_mask_offset") = ACTION_MASK_OFFSET;
+    m.attr("action_mask_size") = ACTION_MASK_SIZE;
 
     m.def("puff_advantage_cpu", &py_puff_advantage_cpu);
     m.def("create_vec", &create_vec, py::arg("args"), py::arg("gpu") = 0);

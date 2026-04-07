@@ -455,6 +455,8 @@ PYBIND11_MODULE(_C, m) {
     m.attr("precision_bytes") = (int)sizeof(precision_t);
     m.attr("env_name") = PUFFER_STRINGIFY(ENV_NAME);
     m.attr("gpu") = 1;
+    m.attr("action_mask_offset") = ACTION_MASK_OFFSET;
+    m.attr("action_mask_size") = ACTION_MASK_SIZE;
 
     // Core functions
     m.def("log", &puf_log);

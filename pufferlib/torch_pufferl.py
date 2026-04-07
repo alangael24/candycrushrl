@@ -34,6 +34,52 @@ _TORCH_TO_TYPESTR = {
     torch.float32: '<f4',
 }
 
+_ACTION_MASK_OFFSET = int(getattr(_C, 'action_mask_offset', -1))
+_ACTION_MASK_SIZE = int(getattr(_C, 'action_mask_size', 0))
+
+def _flatten_observations(observations):
+    if observations is None:
+        return None
+    if observations.ndim <= 2:
+        return observations
+    return observations.reshape(-1, observations.shape[-1])
+
+def _extract_action_mask(observations, logits):
+    if observations is None or _ACTION_MASK_OFFSET < 0 or _ACTION_MASK_SIZE <= 0:
+        return None
+
+    flat_obs = _flatten_observations(observations)
+    if flat_obs is None or flat_obs.shape[-1] < _ACTION_MASK_OFFSET + _ACTION_MASK_SIZE:
+        return None
+
+    flat_mask = flat_obs[:, _ACTION_MASK_OFFSET:_ACTION_MASK_OFFSET + _ACTION_MASK_SIZE]
+    flat_mask = flat_mask > 0.5
+
+    if isinstance(logits, torch.Tensor):
+        if flat_mask.shape[-1] != logits.shape[-1]:
+            return None
+        return flat_mask.to(device=logits.device)
+
+    head_sizes = [head.shape[-1] for head in logits]
+    if flat_mask.shape[-1] != sum(head_sizes):
+        return None
+
+    splits = torch.split(flat_mask, head_sizes, dim=-1)
+    return tuple(mask.to(device=head.device) for mask, head in zip(splits, logits))
+
+def _mask_discrete_logits(logits, action_mask, action=None):
+    if action_mask is None:
+        return logits
+
+    valid = action_mask.to(dtype=torch.bool, device=logits.device)
+    fallback = ~valid.any(dim=-1, keepdim=True)
+    if action is not None:
+        chosen_valid = torch.gather(valid.long(), -1, action.long().unsqueeze(-1)).bool()
+        fallback = fallback | ~chosen_valid
+
+    masked_logits = logits.masked_fill(~valid, -torch.inf)
+    return torch.where(fallback, logits, masked_logits)
+
 def _log_prob(logits, value):
     value = value.long().unsqueeze(-1)
     value, log_pmf = torch.broadcast_tensors(value, logits)
@@ -46,7 +92,7 @@ def _entropy(logits):
     p_log_p = logits * logits_to_probs(logits)
     return -p_log_p.sum(-1)
 
-def sample_logits(logits, action=None):
+def sample_logits(logits, action=None, observations=None):
     is_discrete = isinstance(logits, torch.Tensor)
     if isinstance(logits, torch.distributions.Normal):
         batch = logits.loc.shape[0]
@@ -56,14 +102,29 @@ def sample_logits(logits, action=None):
         logits_entropy = logits.entropy().view(batch, -1).sum(1)
         return action, log_probs, logits_entropy
     elif is_discrete:
+        action_mask = _extract_action_mask(observations, logits)
         logits = logits.unsqueeze(0)
+        if action_mask is not None:
+            action_mask = action_mask.unsqueeze(0)
     else: # multi-discrete
+        action_mask = _extract_action_mask(observations, logits)
         logits = torch.nn.utils.rnn.pad_sequence(
             [l.transpose(0,1) for l in logits],
             batch_first=False,
             padding_value=-torch.inf
         ).permute(1,2,0)
+        if action_mask is not None:
+            action_mask = torch.nn.utils.rnn.pad_sequence(
+                [m.transpose(0,1) for m in action_mask],
+                batch_first=False,
+                padding_value=False,
+            ).permute(1,2,0)
 
+    if action is not None:
+        batch = logits[0].shape[0]
+        action = action.view(batch, -1).T
+
+    logits = _mask_discrete_logits(logits, action_mask, action)
     normalized_logits = logits - logits.logsumexp(dim=-1, keepdim=True)
     probs = logits_to_probs(logits)
 
@@ -71,9 +132,6 @@ def sample_logits(logits, action=None):
         probs = torch.nan_to_num(probs, 1e-8, 1e-8, 1e-8)
         action = torch.multinomial(probs.reshape(-1, probs.shape[-1]), 1, replacement=True).int()
         action = action.reshape(probs.shape[:-1])
-    else:
-        batch = logits[0].shape[0]
-        action = action.view(batch, -1).T
 
     logprob = _log_prob(normalized_logits, action)
     logits_entropy = _entropy(normalized_logits).sum(0)
@@ -107,6 +165,127 @@ def _cpu_tensor(ptr, shape, dtype):
         n *= s
     arr = (ctype * n).from_address(ptr)
     return torch.frombuffer(arr, dtype=dtype).reshape(shape)
+
+def _strip_module_prefix(state_dict):
+    return {k.replace('module.', ''): v for k, v in state_dict.items()}
+
+def _unwrap_policy(policy):
+    return policy.module if hasattr(policy, 'module') else policy
+
+def _native_checkpoint_layout(policy):
+    policy = _unwrap_policy(policy)
+    encoder = policy.encoder
+    decoder = policy.decoder
+    network = policy.network
+
+    if encoder.__class__.__name__ != 'DefaultEncoder':
+        raise TypeError(f'Native raw checkpoint loading only supports DefaultEncoder, got {encoder.__class__.__name__}')
+    if decoder.__class__.__name__ != 'DefaultDecoder':
+        raise TypeError(f'Native raw checkpoint loading only supports DefaultDecoder, got {decoder.__class__.__name__}')
+    if network.__class__.__name__ != 'MinGRU':
+        raise TypeError(f'Native raw checkpoint loading only supports MinGRU, got {network.__class__.__name__}')
+    if not hasattr(network, 'layers'):
+        raise TypeError('Native raw checkpoint loading requires MinGRU.layers')
+
+    hidden_size = encoder.encoder.out_features
+    obs_size = encoder.encoder.in_features
+    num_layers = network.num_layers
+
+    if decoder.is_continuous:
+        output_dim = len(decoder.nvec)
+    else:
+        output_dim = int(np.sum(decoder.nvec))
+
+    decoder_floats = (output_dim + 1) * hidden_size
+    if decoder.is_continuous:
+        decoder_floats += output_dim
+
+    return {
+        'obs_size': obs_size,
+        'hidden_size': hidden_size,
+        'output_dim': output_dim,
+        'num_layers': num_layers,
+        'continuous': decoder.is_continuous,
+        'expected_floats': (
+            hidden_size * obs_size
+            + decoder_floats
+            + num_layers * (3 * hidden_size * hidden_size)
+        ),
+    }
+
+def _load_native_raw_checkpoint(policy, path, device):
+    policy = _unwrap_policy(policy)
+    layout = _native_checkpoint_layout(policy)
+    raw = np.fromfile(path, dtype=np.float32)
+    expected = layout['expected_floats']
+    if raw.size != expected:
+        raise ValueError(f'expected {expected} float32 params, found {raw.size}')
+
+    dtype = next(policy.parameters()).dtype
+    offset = 0
+
+    def take(rows, cols):
+        nonlocal offset
+        count = rows * cols
+        tensor = torch.from_numpy(raw[offset:offset + count].copy()).view(rows, cols)
+        offset += count
+        return tensor.to(device=device, dtype=dtype)
+
+    hidden_size = layout['hidden_size']
+    obs_size = layout['obs_size']
+    output_dim = layout['output_dim']
+
+    encoder_weight = take(hidden_size, obs_size)
+    decoder_weight = take(output_dim + 1, hidden_size)
+    decoder_logstd = None
+    if layout['continuous']:
+        decoder_logstd = take(1, output_dim)
+    recurrent_weights = [take(3 * hidden_size, hidden_size) for _ in range(layout['num_layers'])]
+
+    if offset != raw.size:
+        raise ValueError(f'checkpoint parsing stopped at {offset}, expected {raw.size}')
+
+    with torch.no_grad():
+        policy.encoder.encoder.weight.copy_(encoder_weight)
+        if policy.encoder.encoder.bias is not None:
+            policy.encoder.encoder.bias.zero_()
+
+        if layout['continuous']:
+            policy.decoder.decoder_mean.weight.copy_(decoder_weight[:-1])
+            if policy.decoder.decoder_mean.bias is not None:
+                policy.decoder.decoder_mean.bias.zero_()
+            policy.decoder.decoder_logstd.copy_(decoder_logstd)
+        else:
+            policy.decoder.decoder.weight.copy_(decoder_weight[:-1])
+            if policy.decoder.decoder.bias is not None:
+                policy.decoder.decoder.bias.zero_()
+
+        policy.decoder.value_function.weight.copy_(decoder_weight[-1:].contiguous())
+        if policy.decoder.value_function.bias is not None:
+            policy.decoder.value_function.bias.zero_()
+
+        for layer, weight in zip(policy.network.layers, recurrent_weights):
+            layer.weight.copy_(weight)
+
+def _load_policy_checkpoint(policy, path, device):
+    torch_exc = None
+    try:
+        state_dict = torch.load(path, map_location=device)
+        if not isinstance(state_dict, dict):
+            raise TypeError(f'expected state_dict dict, got {type(state_dict).__name__}')
+        policy.load_state_dict(_strip_module_prefix(state_dict))
+        return
+    except Exception as exc:
+        torch_exc = exc
+
+    try:
+        _load_native_raw_checkpoint(policy, path, device)
+    except Exception as native_exc:
+        raise RuntimeError(
+            f'Failed to load checkpoint {path} as torch state_dict '
+            f'({torch_exc.__class__.__name__}: {torch_exc}) or native raw weights '
+            f'({native_exc.__class__.__name__}: {native_exc})'
+        ) from native_exc
 
 class PuffeRL:
     def __init__(self, args, vec, policy, verbose=True):
@@ -214,7 +393,7 @@ class PuffeRL:
             prof.mark(1)
             with torch.no_grad():
                 logits, value, state = self.policy.forward_eval(o_device, self.state)
-                action, logprob, _ = sample_logits(logits)
+                action, logprob, _ = sample_logits(logits, observations=o_device)
             prof.mark(2)
 
             with torch.no_grad():
@@ -299,7 +478,7 @@ class PuffeRL:
 
             prof.mark(1)
             logits, newvalue = self.policy(mb_obs)
-            actions, newlogprob, entropy = sample_logits(logits, action=mb_actions)
+            actions, newlogprob, entropy = sample_logits(logits, action=mb_actions, observations=mb_obs)
             prof.mark(2)
             prof.elapsed(P.TRAIN_FORWARD, 1, 2)
 
@@ -386,9 +565,7 @@ class PuffeRL:
         torch.save(self.policy.state_dict(), path)
 
     def load_weights(self, path):
-        state_dict = torch.load(path, map_location=self.device)
-        state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
-        self.policy.load_state_dict(state_dict)
+        _load_policy_checkpoint(self.policy, path, self.device)
 
     def render(self, env_id=0):
         self._vec.render(env_id)
@@ -492,9 +669,7 @@ def load_policy(args, vec):
         else:
             raise ValueError('load_id requires --wandb')
 
-        state_dict = torch.load(path, map_location=device)
-        state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
-        policy.load_state_dict(state_dict)
+        _load_policy_checkpoint(policy, path, device)
 
     load_path = args['load_model_path']
     if load_path == 'latest':
@@ -503,9 +678,7 @@ def load_policy(args, vec):
         load_path = max(candidates, key=os.path.getctime)
 
     if load_path is not None:
-        state_dict = torch.load(load_path, map_location=device)
-        state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
-        policy.load_state_dict(state_dict)
+        _load_policy_checkpoint(policy, load_path, device)
 
     return policy
 
