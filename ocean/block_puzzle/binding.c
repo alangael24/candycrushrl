@@ -33,6 +33,9 @@ void my_log(Log* log, Dict* out) {
     dict_set(out, "lines_cleared", log->lines_cleared);
     dict_set(out, "pieces_placed", log->pieces_placed);
     dict_set(out, "invalid_actions", log->invalid_actions);
+    dict_set(out, "mask_invalid_actions", log->mask_invalid_actions);
+    dict_set(out, "mask_mismatch_actions", log->mask_mismatch_actions);
+    dict_set(out, "avg_legal_actions", log->avg_legal_actions);
     dict_set(out, "board_fill", log->board_fill);
     dict_set(out, "episode_return", log->episode_return);
     dict_set(out, "episode_length", log->episode_length);

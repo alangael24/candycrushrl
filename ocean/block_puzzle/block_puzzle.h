@@ -31,6 +31,9 @@ typedef struct Log {
     float lines_cleared;
     float pieces_placed;
     float invalid_actions;
+    float mask_invalid_actions;
+    float mask_mismatch_actions;
+    float avg_legal_actions;
     float board_fill;
     float episode_return;
     float episode_length;
@@ -81,9 +84,12 @@ typedef struct BlockPuzzle {
     int lines_cleared;
     int pieces_placed;
     int invalid_actions;
+    int mask_invalid_actions;
+    int mask_mismatch_actions;
     int timed_out;
     int board_fill_peak;
     float episode_return;
+    float legal_action_sum;
     int current_legal_actions;
     float current_future_flex;
     float current_potential;
@@ -558,6 +564,9 @@ static void write_episode_log(BlockPuzzle* env) {
     env->log.lines_cleared += (float)env->lines_cleared;
     env->log.pieces_placed += (float)env->pieces_placed;
     env->log.invalid_actions += (float)env->invalid_actions;
+    env->log.mask_invalid_actions += (float)env->mask_invalid_actions;
+    env->log.mask_mismatch_actions += (float)env->mask_mismatch_actions;
+    env->log.avg_legal_actions += env->legal_action_sum / (float)max_int(1, env->steps);
     env->log.board_fill += (float)env->board_fill_peak;
     env->log.episode_return += env->episode_return;
     env->log.episode_length += (float)env->steps;
@@ -573,9 +582,12 @@ static void start_episode(BlockPuzzle* env) {
     env->lines_cleared = 0;
     env->pieces_placed = 0;
     env->invalid_actions = 0;
+    env->mask_invalid_actions = 0;
+    env->mask_mismatch_actions = 0;
     env->timed_out = 0;
     env->board_fill_peak = 0;
     env->episode_return = 0.0f;
+    env->legal_action_sum = 0.0f;
     update_observations(env);
 }
 
@@ -647,17 +659,25 @@ static void c_reset(BlockPuzzle* env) {
 
 static void c_step(BlockPuzzle* env) {
     const int slot_stride = BOARD_SIZE * BOARD_SIZE * ACTION_ROTATIONS;
+    const unsigned char* action_mask = env->observations + OBS_BOARD_CELLS + OBS_PREVIEW_CELLS + OBS_SCALAR_CELLS;
     float reward = 0.0f;
     int action = (int)env->actions[0];
     float phi_before = env->current_potential;
     bool timed_out = false;
+    bool mask_says_legal = false;
 
     env->rewards[0] = 0.0f;
     env->terminals[0] = 0.0f;
     env->steps++;
+    env->legal_action_sum += (float)env->current_legal_actions;
+
+    if (action >= 0 && action < ACTION_COUNT) {
+        mask_says_legal = action_mask[action] != 0;
+    }
 
     if (action < 0 || action >= ACTION_COUNT) {
         env->invalid_actions++;
+        env->mask_invalid_actions++;
         reward = env->invalid_penalty;
         update_observations(env);
         if (env->steps >= env->max_episode_steps) {
@@ -691,6 +711,11 @@ static void c_step(BlockPuzzle* env) {
 
         if (!can_place(env, slot, row, col, rotation_idx)) {
             env->invalid_actions++;
+            if (!mask_says_legal) {
+                env->mask_invalid_actions++;
+            } else {
+                env->mask_mismatch_actions++;
+            }
             reward = env->invalid_penalty;
             update_observations(env);
             if (env->steps >= env->max_episode_steps) {
