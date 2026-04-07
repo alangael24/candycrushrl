@@ -57,6 +57,13 @@ typedef struct PieceDef {
     PieceRotation rotations[ACTION_ROTATIONS];
 } PieceDef;
 
+typedef struct MoveStats {
+    int legal_now;
+    int legal_by_piece[HAND_SIZE];
+    int future_flex;
+    uint8_t mask[ACTION_COUNT];
+} MoveStats;
+
 typedef struct BlockPuzzle {
     unsigned char* observations;
     float* actions;
@@ -357,48 +364,58 @@ static bool can_place(BlockPuzzle* env, int slot, int row, int col, int rotation
     return can_place_rotation(env, rotation, row, col);
 }
 
-static int count_action_mask_legal(const unsigned char* action_mask) {
-    int legal = 0;
-    int action;
-    for (action = 0; action < ACTION_COUNT; action++) {
-        legal += action_mask[action] != 0;
-    }
-    return legal;
+static inline int block_piece_count(void) {
+    return (int)(sizeof(BLOCK_PIECE_SEEDS) / sizeof(BLOCK_PIECE_SEEDS[0]));
 }
 
-static int count_piece_placements(BlockPuzzle* env, int piece_idx) {
-    PieceDef* piece = &BLOCK_PIECES[piece_idx];
-    int count = 0;
-    int rotation_idx;
-    int row;
-    int col;
+static inline int action_index_for(int slot, int row, int col, int rotation_idx) {
+    const int slot_stride = BOARD_SIZE * BOARD_SIZE * ACTION_ROTATIONS;
+    return slot * slot_stride + (row * BOARD_SIZE + col) * ACTION_ROTATIONS + rotation_idx;
+}
 
-    for (rotation_idx = 0; rotation_idx < piece->rotation_count; rotation_idx++) {
-        PieceRotation* rotation = &piece->rotations[rotation_idx];
-        if (!env->allow_rotations && rotation_idx != 0) {
-            continue;
-        }
+static inline void scan_moves(const BlockPuzzle* env, MoveStats* out, bool write_mask) {
+    const int piece_count = block_piece_count();
+    int piece_idx;
 
-        for (row = 0; row + rotation->height <= env->board_size; row++) {
-            for (col = 0; col + rotation->width <= env->board_size; col++) {
-                count += can_place_rotation(env, rotation, row, col) ? 1 : 0;
+    memset(out, 0, sizeof(MoveStats));
+    (void)write_mask;
+
+    for (piece_idx = 0; piece_idx < piece_count; piece_idx++) {
+        PieceDef* piece = &BLOCK_PIECES[piece_idx];
+        int rotation_idx;
+
+        for (rotation_idx = 0; rotation_idx < piece->rotation_count; rotation_idx++) {
+            PieceRotation* rotation = &piece->rotations[rotation_idx];
+            int row;
+            int col;
+
+            if (!env->allow_rotations && rotation_idx != 0) {
+                continue;
+            }
+
+            for (row = 0; row + rotation->height <= env->board_size; row++) {
+                for (col = 0; col + rotation->width <= env->board_size; col++) {
+                    int slot;
+                    if (!can_place_rotation((BlockPuzzle*)env, rotation, row, col)) {
+                        continue;
+                    }
+
+                    out->future_flex += 1;
+                    for (slot = 0; slot < HAND_SIZE; slot++) {
+                        if (!env->hand_active[slot] || env->hand_piece[slot] != piece_idx) {
+                            continue;
+                        }
+
+                        out->legal_now += 1;
+                        out->legal_by_piece[slot] += 1;
+                        if (write_mask) {
+                            out->mask[action_index_for(slot, row, col, rotation_idx)] = 1;
+                        }
+                    }
+                }
             }
         }
     }
-
-    return count;
-}
-
-static float compute_future_flex(BlockPuzzle* env) {
-    const int piece_count = (int)(sizeof(BLOCK_PIECE_SEEDS) / sizeof(BLOCK_PIECE_SEEDS[0]));
-    int total = 0;
-    int piece_idx;
-
-    for (piece_idx = 0; piece_idx < piece_count; piece_idx++) {
-        total += count_piece_placements(env, piece_idx);
-    }
-
-    return (float)total / (float)piece_count;
 }
 
 static float compute_state_potential(BlockPuzzle* env, int legal_count, float future_flex) {
@@ -407,30 +424,6 @@ static float compute_state_potential(BlockPuzzle* env, int legal_count, float fu
     return env->legal_reward_scale * log1pf((float)legal_count)
         + env->future_flex_reward_scale * log1pf(future_flex)
         - env->fill_penalty_scale * fill_over * fill_over;
-}
-
-static bool write_action_mask(BlockPuzzle* env, unsigned char* action_mask) {
-    const int slot_stride = BOARD_SIZE * BOARD_SIZE * ACTION_ROTATIONS;
-    bool any_legal = false;
-    int slot;
-    int row;
-    int col;
-    int rotation_idx;
-
-    memset(action_mask, 0, ACTION_COUNT);
-    for (slot = 0; slot < HAND_SIZE; slot++) {
-        for (row = 0; row < BOARD_SIZE; row++) {
-            for (col = 0; col < BOARD_SIZE; col++) {
-                const int anchor = (row * BOARD_SIZE + col) * ACTION_ROTATIONS;
-                for (rotation_idx = 0; rotation_idx < ACTION_ROTATIONS; rotation_idx++) {
-                    const unsigned char legal = can_place(env, slot, row, col, rotation_idx) ? 1 : 0;
-                    action_mask[slot * slot_stride + anchor + rotation_idx] = legal;
-                    any_legal = any_legal || legal != 0;
-                }
-            }
-        }
-    }
-    return any_legal;
 }
 
 static void write_board_obs(BlockPuzzle* env, unsigned char* board_obs) {
@@ -483,18 +476,19 @@ static bool update_observations(BlockPuzzle* env) {
     unsigned char* preview_obs = board_obs + OBS_BOARD_CELLS;
     unsigned char* scalar_obs = preview_obs + OBS_PREVIEW_CELLS;
     unsigned char* action_mask = scalar_obs + OBS_SCALAR_CELLS;
-    bool any_legal;
+    MoveStats move_stats;
 
     memset(env->observations, 0, OBS_TOTAL_SIZE);
     write_board_obs(env, board_obs);
     write_preview_obs(env, preview_obs);
     write_scalar_obs(env, scalar_obs);
-    any_legal = write_action_mask(env, action_mask);
-    env->current_legal_actions = count_action_mask_legal(action_mask);
-    env->current_future_flex = compute_future_flex(env);
+    scan_moves(env, &move_stats, true);
+    memcpy(action_mask, move_stats.mask, ACTION_COUNT);
+    env->current_legal_actions = move_stats.legal_now;
+    env->current_future_flex = (float)move_stats.future_flex / (float)block_piece_count();
     env->current_potential = compute_state_potential(
         env, env->current_legal_actions, env->current_future_flex);
-    return any_legal;
+    return move_stats.legal_now > 0;
 }
 
 static void place_piece(BlockPuzzle* env, int slot, int row, int col, int rotation_idx) {
