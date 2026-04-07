@@ -21,8 +21,11 @@ void my_init(Env* env, Dict* kwargs) {
     env->loss_penalty = (float)dict_get(kwargs, "loss_penalty")->value;
     env->shaping_gamma = (float)dict_get(kwargs, "shaping_gamma")->value;
     env->legal_reward_scale = (float)dict_get(kwargs, "legal_reward_scale")->value;
+    env->min_legal_reward_scale = (float)dict_get(kwargs, "min_legal_reward_scale")->value;
+    env->dead_piece_penalty_scale = (float)dict_get(kwargs, "dead_piece_penalty_scale")->value;
     env->future_flex_reward_scale = (float)dict_get(kwargs, "future_flex_reward_scale")->value;
     env->fill_penalty_scale = (float)dict_get(kwargs, "fill_penalty_scale")->value;
+    env->tiny_pocket_penalty_scale = (float)dict_get(kwargs, "tiny_pocket_penalty_scale")->value;
     env->fill_penalty_threshold = (float)dict_get(kwargs, "fill_penalty_threshold")->value;
     env->max_episode_steps = (int)dict_get(kwargs, "max_episode_steps")->value;
     env->future_flex_update_interval = (int)dict_get(kwargs, "future_flex_update_interval")->value;

@@ -60,6 +60,9 @@ typedef struct PieceDef {
 typedef struct MoveStats {
     int legal_now;
     int legal_by_piece[HAND_SIZE];
+    int active_pieces;
+    int min_legal_by_piece;
+    int zero_legal_pieces;
     int future_flex;
     uint8_t mask[ACTION_COUNT];
 } MoveStats;
@@ -81,8 +84,11 @@ typedef struct BlockPuzzle {
     float loss_penalty;
     float shaping_gamma;
     float legal_reward_scale;
+    float min_legal_reward_scale;
+    float dead_piece_penalty_scale;
     float future_flex_reward_scale;
     float fill_penalty_scale;
+    float tiny_pocket_penalty_scale;
     float fill_penalty_threshold;
     int max_episode_steps;
     int future_flex_update_interval;
@@ -375,6 +381,25 @@ static inline int action_index_for(int slot, int row, int col, int rotation_idx)
     return slot * slot_stride + (row * BOARD_SIZE + col) * ACTION_ROTATIONS + rotation_idx;
 }
 
+static inline void finalize_move_stats(const BlockPuzzle* env, MoveStats* out) {
+    int slot;
+
+    out->min_legal_by_piece = 0;
+    for (slot = 0; slot < HAND_SIZE; slot++) {
+        if (!env->hand_active[slot]) {
+            continue;
+        }
+
+        if (out->active_pieces == 0 || out->legal_by_piece[slot] < out->min_legal_by_piece) {
+            out->min_legal_by_piece = out->legal_by_piece[slot];
+        }
+        out->active_pieces += 1;
+        if (out->legal_by_piece[slot] == 0) {
+            out->zero_legal_pieces += 1;
+        }
+    }
+}
+
 static inline void scan_moves(const BlockPuzzle* env, MoveStats* out, bool write_mask, bool compute_future_flex) {
     const int piece_count = block_piece_count();
     int piece_idx;
@@ -418,6 +443,7 @@ static inline void scan_moves(const BlockPuzzle* env, MoveStats* out, bool write
                 }
             }
         }
+        finalize_move_stats(env, out);
         return;
     }
 
@@ -457,6 +483,36 @@ static inline void scan_moves(const BlockPuzzle* env, MoveStats* out, bool write
             }
         }
     }
+    finalize_move_stats(env, out);
+}
+
+static inline int count_tiny_pockets(const BlockPuzzle* env) {
+    int row;
+    int col;
+    int total = 0;
+
+    for (row = 0; row < env->board_size; row++) {
+        for (col = 0; col < env->board_size; col++) {
+            bool up_open;
+            bool down_open;
+            bool left_open;
+            bool right_open;
+
+            if (env->board[row][col]) {
+                continue;
+            }
+
+            up_open = row > 0 && !env->board[row - 1][col];
+            down_open = row + 1 < env->board_size && !env->board[row + 1][col];
+            left_open = col > 0 && !env->board[row][col - 1];
+            right_open = col + 1 < env->board_size && !env->board[row][col + 1];
+            if (!up_open && !down_open && !left_open && !right_open) {
+                total += 1;
+            }
+        }
+    }
+
+    return total;
 }
 
 static inline bool should_compute_future_flex(const BlockPuzzle* env, bool force_refresh) {
@@ -475,12 +531,15 @@ static inline bool should_compute_future_flex(const BlockPuzzle* env, bool force
     return env->future_flex_steps_since_update + 1 >= env->future_flex_update_interval;
 }
 
-static float compute_state_potential(BlockPuzzle* env, int legal_count, float future_flex) {
-    const float fill_ratio = (float)board_fill(env) / (float)(env->board_size * env->board_size);
+static float compute_state_potential(BlockPuzzle* env, const MoveStats* move_stats, int fill_count, int tiny_pockets, float future_flex) {
+    const float fill_ratio = (float)fill_count / (float)(env->board_size * env->board_size);
     const float fill_over = fmaxf(0.0f, fill_ratio - env->fill_penalty_threshold);
-    return env->legal_reward_scale * log1pf((float)legal_count)
+    return env->legal_reward_scale * log1pf((float)move_stats->legal_now)
+        + env->min_legal_reward_scale * log1pf((float)(move_stats->min_legal_by_piece + 1))
+        - env->dead_piece_penalty_scale * (float)move_stats->zero_legal_pieces
         + env->future_flex_reward_scale * log1pf(future_flex)
-        - env->fill_penalty_scale * fill_over * fill_over;
+        - env->fill_penalty_scale * fill_over * fill_over
+        - env->tiny_pocket_penalty_scale * (float)tiny_pockets;
 }
 
 static void write_board_obs(BlockPuzzle* env, unsigned char* board_obs) {
@@ -535,6 +594,8 @@ static bool update_observations(BlockPuzzle* env, bool force_future_flex_refresh
     unsigned char* action_mask = scalar_obs + OBS_SCALAR_CELLS;
     MoveStats move_stats;
     bool recompute_future_flex = should_compute_future_flex(env, force_future_flex_refresh);
+    int fill_count;
+    int tiny_pockets;
 
     memset(env->observations, 0, OBS_TOTAL_SIZE);
     write_board_obs(env, board_obs);
@@ -552,8 +613,10 @@ static bool update_observations(BlockPuzzle* env, bool force_future_flex_refresh
     } else {
         env->future_flex_steps_since_update += 1;
     }
+    fill_count = board_fill(env);
+    tiny_pockets = count_tiny_pockets(env);
     env->current_potential = compute_state_potential(
-        env, env->current_legal_actions, env->current_future_flex);
+        env, &move_stats, fill_count, tiny_pockets, env->current_future_flex);
     return move_stats.legal_now > 0;
 }
 
@@ -679,11 +742,20 @@ static void init_env(BlockPuzzle* env) {
     if (env->legal_reward_scale < 0.0f) {
         env->legal_reward_scale = 0.03f;
     }
+    if (env->min_legal_reward_scale < 0.0f) {
+        env->min_legal_reward_scale = 0.02f;
+    }
+    if (env->dead_piece_penalty_scale < 0.0f) {
+        env->dead_piece_penalty_scale = 0.10f;
+    }
     if (env->future_flex_reward_scale < 0.0f) {
-        env->future_flex_reward_scale = 0.05f;
+        env->future_flex_reward_scale = 0.0f;
     }
     if (env->fill_penalty_scale < 0.0f) {
         env->fill_penalty_scale = 2.5f;
+    }
+    if (env->tiny_pocket_penalty_scale < 0.0f) {
+        env->tiny_pocket_penalty_scale = 0.10f;
     }
     if (env->fill_penalty_threshold <= 0.0f || env->fill_penalty_threshold >= 1.0f) {
         env->fill_penalty_threshold = 0.60f;
