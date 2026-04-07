@@ -84,8 +84,10 @@ typedef struct BlockPuzzle {
     float future_flex_reward_scale;
     float fill_penalty_scale;
     float fill_penalty_threshold;
+    float future_flex_danger_fill_threshold;
     int max_episode_steps;
     int future_flex_update_interval;
+    int future_flex_danger_legal_threshold;
 
     int score;
     int steps;
@@ -475,6 +477,12 @@ static inline bool should_compute_future_flex(const BlockPuzzle* env, bool force
     return env->future_flex_steps_since_update + 1 >= env->future_flex_update_interval;
 }
 
+static inline bool is_future_flex_danger(const BlockPuzzle* env, int legal_count, int fill_count) {
+    const float fill_ratio = (float)fill_count / (float)(env->board_size * env->board_size);
+    return fill_ratio >= env->future_flex_danger_fill_threshold
+        || legal_count <= env->future_flex_danger_legal_threshold;
+}
+
 static float compute_state_potential(BlockPuzzle* env, int legal_count, float future_flex) {
     const float fill_ratio = (float)board_fill(env) / (float)(env->board_size * env->board_size);
     const float fill_over = fmaxf(0.0f, fill_ratio - env->fill_penalty_threshold);
@@ -534,19 +542,28 @@ static bool update_observations(BlockPuzzle* env, bool force_future_flex_refresh
     unsigned char* scalar_obs = preview_obs + OBS_PREVIEW_CELLS;
     unsigned char* action_mask = scalar_obs + OBS_SCALAR_CELLS;
     MoveStats move_stats;
-    bool recompute_future_flex = should_compute_future_flex(env, force_future_flex_refresh);
+    int fill_count;
+    bool future_flex_danger;
+    bool recompute_future_flex;
 
     memset(env->observations, 0, OBS_TOTAL_SIZE);
     write_board_obs(env, board_obs);
     write_preview_obs(env, preview_obs);
     write_scalar_obs(env, scalar_obs);
-    scan_moves(env, &move_stats, true, recompute_future_flex);
+    scan_moves(env, &move_stats, true, false);
+    fill_count = board_fill(env);
+    future_flex_danger = is_future_flex_danger(env, move_stats.legal_now, fill_count);
+    recompute_future_flex = future_flex_danger
+        && should_compute_future_flex(env, force_future_flex_refresh);
+    if (recompute_future_flex) {
+        scan_moves(env, &move_stats, true, true);
+    }
     memcpy(action_mask, move_stats.mask, ACTION_COUNT);
     env->current_legal_actions = move_stats.legal_now;
     if (recompute_future_flex) {
         env->current_future_flex = (float)move_stats.future_flex / (float)block_piece_count();
         env->future_flex_steps_since_update = 0;
-    } else if (env->future_flex_reward_scale <= 0.0f) {
+    } else if (!future_flex_danger || env->future_flex_reward_scale <= 0.0f) {
         env->current_future_flex = 0.0f;
         env->future_flex_steps_since_update = 0;
     } else {
@@ -688,11 +705,17 @@ static void init_env(BlockPuzzle* env) {
     if (env->fill_penalty_threshold <= 0.0f || env->fill_penalty_threshold >= 1.0f) {
         env->fill_penalty_threshold = 0.60f;
     }
+    if (env->future_flex_danger_fill_threshold <= 0.0f || env->future_flex_danger_fill_threshold >= 1.0f) {
+        env->future_flex_danger_fill_threshold = 0.60f;
+    }
     if (env->max_episode_steps <= 0) {
         env->max_episode_steps = 500;
     }
     if (env->future_flex_update_interval <= 0) {
         env->future_flex_update_interval = 1;
+    }
+    if (env->future_flex_danger_legal_threshold <= 0) {
+        env->future_flex_danger_legal_threshold = 96;
     }
 }
 

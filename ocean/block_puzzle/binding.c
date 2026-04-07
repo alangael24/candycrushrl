@@ -24,8 +24,10 @@ void my_init(Env* env, Dict* kwargs) {
     env->future_flex_reward_scale = (float)dict_get(kwargs, "future_flex_reward_scale")->value;
     env->fill_penalty_scale = (float)dict_get(kwargs, "fill_penalty_scale")->value;
     env->fill_penalty_threshold = (float)dict_get(kwargs, "fill_penalty_threshold")->value;
+    env->future_flex_danger_fill_threshold = (float)dict_get(kwargs, "future_flex_danger_fill_threshold")->value;
     env->max_episode_steps = (int)dict_get(kwargs, "max_episode_steps")->value;
     env->future_flex_update_interval = (int)dict_get(kwargs, "future_flex_update_interval")->value;
+    env->future_flex_danger_legal_threshold = (int)dict_get(kwargs, "future_flex_danger_legal_threshold")->value;
     init_env(env);
 }
 
