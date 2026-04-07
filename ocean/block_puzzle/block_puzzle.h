@@ -85,6 +85,7 @@ typedef struct BlockPuzzle {
     float fill_penalty_scale;
     float fill_penalty_threshold;
     int max_episode_steps;
+    int future_flex_update_interval;
 
     int score;
     int steps;
@@ -100,6 +101,7 @@ typedef struct BlockPuzzle {
     int current_legal_actions;
     float current_future_flex;
     float current_potential;
+    int future_flex_steps_since_update;
 
     unsigned int rng;
     unsigned char board[MAX_BOARD_SIZE][MAX_BOARD_SIZE];
@@ -373,12 +375,51 @@ static inline int action_index_for(int slot, int row, int col, int rotation_idx)
     return slot * slot_stride + (row * BOARD_SIZE + col) * ACTION_ROTATIONS + rotation_idx;
 }
 
-static inline void scan_moves(const BlockPuzzle* env, MoveStats* out, bool write_mask) {
+static inline void scan_moves(const BlockPuzzle* env, MoveStats* out, bool write_mask, bool compute_future_flex) {
     const int piece_count = block_piece_count();
     int piece_idx;
 
     memset(out, 0, sizeof(MoveStats));
     (void)write_mask;
+
+    if (!compute_future_flex) {
+        int slot;
+
+        for (slot = 0; slot < HAND_SIZE; slot++) {
+            PieceDef* piece;
+            int rotation_idx;
+
+            if (!env->hand_active[slot]) {
+                continue;
+            }
+
+            piece = &BLOCK_PIECES[env->hand_piece[slot]];
+            for (rotation_idx = 0; rotation_idx < piece->rotation_count; rotation_idx++) {
+                PieceRotation* rotation = &piece->rotations[rotation_idx];
+                int row;
+                int col;
+
+                if (!env->allow_rotations && rotation_idx != 0) {
+                    continue;
+                }
+
+                for (row = 0; row + rotation->height <= env->board_size; row++) {
+                    for (col = 0; col + rotation->width <= env->board_size; col++) {
+                        if (!can_place_rotation((BlockPuzzle*)env, rotation, row, col)) {
+                            continue;
+                        }
+
+                        out->legal_now += 1;
+                        out->legal_by_piece[slot] += 1;
+                        if (write_mask) {
+                            out->mask[action_index_for(slot, row, col, rotation_idx)] = 1;
+                        }
+                    }
+                }
+            }
+        }
+        return;
+    }
 
     for (piece_idx = 0; piece_idx < piece_count; piece_idx++) {
         PieceDef* piece = &BLOCK_PIECES[piece_idx];
@@ -416,6 +457,22 @@ static inline void scan_moves(const BlockPuzzle* env, MoveStats* out, bool write
             }
         }
     }
+}
+
+static inline bool should_compute_future_flex(const BlockPuzzle* env, bool force_refresh) {
+    if (env->future_flex_reward_scale <= 0.0f) {
+        return false;
+    }
+
+    if (force_refresh) {
+        return true;
+    }
+
+    if (env->future_flex_update_interval <= 1) {
+        return true;
+    }
+
+    return env->future_flex_steps_since_update + 1 >= env->future_flex_update_interval;
 }
 
 static float compute_state_potential(BlockPuzzle* env, int legal_count, float future_flex) {
@@ -471,21 +528,30 @@ static void write_scalar_obs(BlockPuzzle* env, unsigned char* scalar_obs) {
     }
 }
 
-static bool update_observations(BlockPuzzle* env) {
+static bool update_observations(BlockPuzzle* env, bool force_future_flex_refresh) {
     unsigned char* board_obs = env->observations;
     unsigned char* preview_obs = board_obs + OBS_BOARD_CELLS;
     unsigned char* scalar_obs = preview_obs + OBS_PREVIEW_CELLS;
     unsigned char* action_mask = scalar_obs + OBS_SCALAR_CELLS;
     MoveStats move_stats;
+    bool recompute_future_flex = should_compute_future_flex(env, force_future_flex_refresh);
 
     memset(env->observations, 0, OBS_TOTAL_SIZE);
     write_board_obs(env, board_obs);
     write_preview_obs(env, preview_obs);
     write_scalar_obs(env, scalar_obs);
-    scan_moves(env, &move_stats, true);
+    scan_moves(env, &move_stats, true, recompute_future_flex);
     memcpy(action_mask, move_stats.mask, ACTION_COUNT);
     env->current_legal_actions = move_stats.legal_now;
-    env->current_future_flex = (float)move_stats.future_flex / (float)block_piece_count();
+    if (recompute_future_flex) {
+        env->current_future_flex = (float)move_stats.future_flex / (float)block_piece_count();
+        env->future_flex_steps_since_update = 0;
+    } else if (env->future_flex_reward_scale <= 0.0f) {
+        env->current_future_flex = 0.0f;
+        env->future_flex_steps_since_update = 0;
+    } else {
+        env->future_flex_steps_since_update += 1;
+    }
     env->current_potential = compute_state_potential(
         env, env->current_legal_actions, env->current_future_flex);
     return move_stats.legal_now > 0;
@@ -582,7 +648,9 @@ static void start_episode(BlockPuzzle* env) {
     env->board_fill_peak = 0;
     env->episode_return = 0.0f;
     env->legal_action_sum = 0.0f;
-    update_observations(env);
+    env->future_flex_steps_since_update = 0;
+    env->current_future_flex = 0.0f;
+    update_observations(env, true);
 }
 
 static void init_env(BlockPuzzle* env) {
@@ -622,6 +690,9 @@ static void init_env(BlockPuzzle* env) {
     }
     if (env->max_episode_steps <= 0) {
         env->max_episode_steps = 500;
+    }
+    if (env->future_flex_update_interval <= 0) {
+        env->future_flex_update_interval = 1;
     }
 }
 
@@ -673,7 +744,7 @@ static void c_step(BlockPuzzle* env) {
         env->invalid_actions++;
         env->mask_invalid_actions++;
         reward = env->invalid_penalty;
-        update_observations(env);
+        update_observations(env, false);
         if (env->steps >= env->max_episode_steps) {
             timed_out = true;
         }
@@ -702,6 +773,7 @@ static void c_step(BlockPuzzle* env) {
         int cleared_lines = 0;
         int cleared_cells;
         bool any_legal;
+        bool hand_changed = false;
 
         if (!can_place(env, slot, row, col, rotation_idx)) {
             env->invalid_actions++;
@@ -711,7 +783,7 @@ static void c_step(BlockPuzzle* env) {
                 env->mask_mismatch_actions++;
             }
             reward = env->invalid_penalty;
-            update_observations(env);
+            update_observations(env, false);
             if (env->steps >= env->max_episode_steps) {
                 timed_out = true;
             }
@@ -746,9 +818,10 @@ static void c_step(BlockPuzzle* env) {
 
         if (!any_active_piece(env)) {
             draw_hand(env);
+            hand_changed = true;
         }
 
-        any_legal = update_observations(env);
+        any_legal = update_observations(env, hand_changed || cleared_lines > 0);
         if (!any_legal) {
             reward += env->loss_penalty;
             reward -= phi_before;
