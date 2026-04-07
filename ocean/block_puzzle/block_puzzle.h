@@ -34,6 +34,7 @@ typedef struct Log {
     float board_fill;
     float episode_return;
     float episode_length;
+    float timeouts;
     float n;
 } Log;
 
@@ -73,12 +74,14 @@ typedef struct BlockPuzzle {
     float future_flex_reward_scale;
     float fill_penalty_scale;
     float fill_penalty_threshold;
+    int max_episode_steps;
 
     int score;
     int steps;
     int lines_cleared;
     int pieces_placed;
     int invalid_actions;
+    int timed_out;
     int board_fill_peak;
     float episode_return;
     int current_legal_actions;
@@ -558,6 +561,7 @@ static void write_episode_log(BlockPuzzle* env) {
     env->log.board_fill += (float)env->board_fill_peak;
     env->log.episode_return += env->episode_return;
     env->log.episode_length += (float)env->steps;
+    env->log.timeouts += (float)env->timed_out;
     env->log.n += 1.0f;
 }
 
@@ -569,6 +573,7 @@ static void start_episode(BlockPuzzle* env) {
     env->lines_cleared = 0;
     env->pieces_placed = 0;
     env->invalid_actions = 0;
+    env->timed_out = 0;
     env->board_fill_peak = 0;
     env->episode_return = 0.0f;
     update_observations(env);
@@ -609,6 +614,9 @@ static void init_env(BlockPuzzle* env) {
     if (env->fill_penalty_threshold <= 0.0f || env->fill_penalty_threshold >= 1.0f) {
         env->fill_penalty_threshold = 0.60f;
     }
+    if (env->max_episode_steps <= 0) {
+        env->max_episode_steps = 500;
+    }
 }
 
 static void allocate(BlockPuzzle* env) {
@@ -642,6 +650,7 @@ static void c_step(BlockPuzzle* env) {
     float reward = 0.0f;
     int action = (int)env->actions[0];
     float phi_before = env->current_potential;
+    bool timed_out = false;
 
     env->rewards[0] = 0.0f;
     env->terminals[0] = 0.0f;
@@ -651,6 +660,18 @@ static void c_step(BlockPuzzle* env) {
         env->invalid_actions++;
         reward = env->invalid_penalty;
         update_observations(env);
+        if (env->steps >= env->max_episode_steps) {
+            timed_out = true;
+        }
+        if (timed_out) {
+            env->timed_out = 1;
+            env->terminals[0] = 1.0f;
+            env->rewards[0] = reward;
+            env->episode_return += reward;
+            write_episode_log(env);
+            start_episode(env);
+            return;
+        }
         env->rewards[0] = reward;
         env->episode_return += reward;
         return;
@@ -672,6 +693,18 @@ static void c_step(BlockPuzzle* env) {
             env->invalid_actions++;
             reward = env->invalid_penalty;
             update_observations(env);
+            if (env->steps >= env->max_episode_steps) {
+                timed_out = true;
+            }
+            if (timed_out) {
+                env->timed_out = 1;
+                env->terminals[0] = 1.0f;
+                env->rewards[0] = reward;
+                env->episode_return += reward;
+                write_episode_log(env);
+                start_episode(env);
+                return;
+            }
             env->rewards[0] = reward;
             env->episode_return += reward;
             return;
@@ -700,6 +733,19 @@ static void c_step(BlockPuzzle* env) {
         if (!any_legal) {
             reward += env->loss_penalty;
             reward -= phi_before;
+            env->terminals[0] = 1.0f;
+            env->episode_return += reward;
+            write_episode_log(env);
+            start_episode(env);
+            env->rewards[0] = reward;
+            return;
+        }
+
+        if (env->steps >= env->max_episode_steps) {
+            timed_out = true;
+        }
+        if (timed_out) {
+            env->timed_out = 1;
             env->terminals[0] = 1.0f;
             env->episode_return += reward;
             write_episode_log(env);

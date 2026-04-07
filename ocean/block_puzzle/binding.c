@@ -24,6 +24,7 @@ void my_init(Env* env, Dict* kwargs) {
     env->future_flex_reward_scale = (float)dict_get(kwargs, "future_flex_reward_scale")->value;
     env->fill_penalty_scale = (float)dict_get(kwargs, "fill_penalty_scale")->value;
     env->fill_penalty_threshold = (float)dict_get(kwargs, "fill_penalty_threshold")->value;
+    env->max_episode_steps = (int)dict_get(kwargs, "max_episode_steps")->value;
     init_env(env);
 }
 
@@ -35,5 +36,6 @@ void my_log(Log* log, Dict* out) {
     dict_set(out, "board_fill", log->board_fill);
     dict_set(out, "episode_return", log->episode_return);
     dict_set(out, "episode_length", log->episode_length);
+    dict_set(out, "timeouts", log->timeouts);
     dict_set(out, "n", log->n);
 }
