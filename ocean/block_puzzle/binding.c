@@ -21,13 +21,12 @@ void my_init(Env* env, Dict* kwargs) {
     env->loss_penalty = (float)dict_get(kwargs, "loss_penalty")->value;
     env->shaping_gamma = (float)dict_get(kwargs, "shaping_gamma")->value;
     env->legal_reward_scale = (float)dict_get(kwargs, "legal_reward_scale")->value;
-    env->future_flex_reward_scale = (float)dict_get(kwargs, "future_flex_reward_scale")->value;
+    env->hand_finishable_reward_scale = (float)dict_get(kwargs, "hand_finishable_reward_scale")->value;
+    env->dead_visible_piece_penalty_scale = (float)dict_get(kwargs, "dead_visible_piece_penalty_scale")->value;
     env->fill_penalty_scale = (float)dict_get(kwargs, "fill_penalty_scale")->value;
     env->fill_penalty_threshold = (float)dict_get(kwargs, "fill_penalty_threshold")->value;
-    env->future_flex_danger_fill_threshold = (float)dict_get(kwargs, "future_flex_danger_fill_threshold")->value;
+    env->tiny_pocket_penalty_scale = (float)dict_get(kwargs, "tiny_pocket_penalty_scale")->value;
     env->max_episode_steps = (int)dict_get(kwargs, "max_episode_steps")->value;
-    env->future_flex_update_interval = (int)dict_get(kwargs, "future_flex_update_interval")->value;
-    env->future_flex_danger_legal_threshold = (int)dict_get(kwargs, "future_flex_danger_legal_threshold")->value;
     init_env(env);
 }
 
@@ -39,6 +38,11 @@ void my_log(Log* log, Dict* out) {
     dict_set(out, "mask_invalid_actions", log->mask_invalid_actions);
     dict_set(out, "mask_mismatch_actions", log->mask_mismatch_actions);
     dict_set(out, "avg_legal_actions", log->avg_legal_actions);
+    dict_set(out, "dead_visible_pieces", log->dead_visible_pieces);
+    dict_set(out, "min_legal_visible", log->min_legal_visible);
+    dict_set(out, "sum_legal_visible", log->sum_legal_visible);
+    dict_set(out, "hand_finishable", log->hand_finishable);
+    dict_set(out, "tiny_pockets", log->tiny_pockets);
     dict_set(out, "board_fill", log->board_fill);
     dict_set(out, "episode_return", log->episode_return);
     dict_set(out, "episode_length", log->episode_length);

@@ -22,6 +22,7 @@
 #define OBS_PREVIEW_CELLS (HAND_SIZE * PREVIEW_SIZE * PREVIEW_SIZE)
 #define OBS_SCALAR_CELLS HAND_SIZE
 #define ACTION_COUNT (HAND_SIZE * BOARD_SIZE * BOARD_SIZE * ACTION_ROTATIONS)
+#define MAX_SLOT_PLACEMENTS (BOARD_SIZE * BOARD_SIZE * ACTION_ROTATIONS)
 #define OBS_TOTAL_SIZE (OBS_BOARD_CELLS + OBS_PREVIEW_CELLS + OBS_SCALAR_CELLS + ACTION_COUNT)
 
 #define BIT_AT(row, col) (1u << ((row) * PREVIEW_SIZE + (col)))
@@ -34,6 +35,11 @@ typedef struct Log {
     float mask_invalid_actions;
     float mask_mismatch_actions;
     float avg_legal_actions;
+    float dead_visible_pieces;
+    float min_legal_visible;
+    float sum_legal_visible;
+    float hand_finishable;
+    float tiny_pockets;
     float board_fill;
     float episode_return;
     float episode_length;
@@ -60,9 +66,17 @@ typedef struct PieceDef {
 typedef struct MoveStats {
     int legal_now;
     int legal_by_piece[HAND_SIZE];
-    int future_flex;
+    int dead_visible_pieces;
+    int min_legal_visible;
+    int hand_finishable;
     uint8_t mask[ACTION_COUNT];
 } MoveStats;
+
+typedef struct PlacementCandidate {
+    unsigned char row;
+    unsigned char col;
+    unsigned char rotation_idx;
+} PlacementCandidate;
 
 typedef struct BlockPuzzle {
     unsigned char* observations;
@@ -81,13 +95,12 @@ typedef struct BlockPuzzle {
     float loss_penalty;
     float shaping_gamma;
     float legal_reward_scale;
-    float future_flex_reward_scale;
+    float hand_finishable_reward_scale;
+    float dead_visible_piece_penalty_scale;
     float fill_penalty_scale;
     float fill_penalty_threshold;
-    float future_flex_danger_fill_threshold;
+    float tiny_pocket_penalty_scale;
     int max_episode_steps;
-    int future_flex_update_interval;
-    int future_flex_danger_legal_threshold;
 
     int score;
     int steps;
@@ -100,10 +113,18 @@ typedef struct BlockPuzzle {
     int board_fill_peak;
     float episode_return;
     float legal_action_sum;
+    float dead_visible_piece_sum;
+    float min_legal_visible_sum;
+    float sum_legal_visible_sum;
+    float hand_finishable_sum;
+    float tiny_pocket_sum;
     int current_legal_actions;
-    float current_future_flex;
+    int current_dead_visible_pieces;
+    int current_min_legal_visible;
+    int current_sum_legal_visible;
+    int current_hand_finishable;
+    int current_tiny_pockets;
     float current_potential;
-    int future_flex_steps_since_update;
 
     unsigned int rng;
     unsigned char board[MAX_BOARD_SIZE][MAX_BOARD_SIZE];
@@ -377,56 +398,249 @@ static inline int action_index_for(int slot, int row, int col, int rotation_idx)
     return slot * slot_stride + (row * BOARD_SIZE + col) * ACTION_ROTATIONS + rotation_idx;
 }
 
-static inline void scan_moves(const BlockPuzzle* env, MoveStats* out, bool write_mask, bool compute_future_flex) {
-    const int piece_count = block_piece_count();
-    int piece_idx;
+static inline bool can_place_rotation_on_board(
+        const unsigned char board[MAX_BOARD_SIZE][MAX_BOARD_SIZE],
+        int board_size, const PieceRotation* rotation, int row, int col) {
+    int i;
 
-    memset(out, 0, sizeof(MoveStats));
-    (void)write_mask;
+    if (row < 0 || col < 0) {
+        return false;
+    }
+    if (row + rotation->height > board_size) {
+        return false;
+    }
+    if (col + rotation->width > board_size) {
+        return false;
+    }
 
-    if (!compute_future_flex) {
-        int slot;
+    for (i = 0; i < rotation->cells; i++) {
+        const int rr = row + rotation->rows[i];
+        const int cc = col + rotation->cols[i];
+        if (board[rr][cc]) {
+            return false;
+        }
+    }
 
-        for (slot = 0; slot < HAND_SIZE; slot++) {
-            PieceDef* piece;
-            int rotation_idx;
+    return true;
+}
 
-            if (!env->hand_active[slot]) {
+static inline void copy_board_state(
+        unsigned char dst[MAX_BOARD_SIZE][MAX_BOARD_SIZE],
+        const unsigned char src[MAX_BOARD_SIZE][MAX_BOARD_SIZE],
+        int board_size) {
+    int row;
+    for (row = 0; row < board_size; row++) {
+        memcpy(dst[row], src[row], (size_t)board_size * sizeof(unsigned char));
+    }
+}
+
+static inline void place_rotation_on_board(
+        unsigned char board[MAX_BOARD_SIZE][MAX_BOARD_SIZE],
+        const PieceRotation* rotation, int row, int col) {
+    int i;
+
+    for (i = 0; i < rotation->cells; i++) {
+        board[row + rotation->rows[i]][col + rotation->cols[i]] = 1;
+    }
+}
+
+static inline void clear_completed_lines_on_board(
+        unsigned char board[MAX_BOARD_SIZE][MAX_BOARD_SIZE], int board_size) {
+    bool full_rows[BOARD_SIZE] = {0};
+    bool full_cols[BOARD_SIZE] = {0};
+    int row;
+    int col;
+
+    for (row = 0; row < board_size; row++) {
+        bool full = true;
+        for (col = 0; col < board_size; col++) {
+            if (!board[row][col]) {
+                full = false;
+                break;
+            }
+        }
+        full_rows[row] = full;
+    }
+
+    for (col = 0; col < board_size; col++) {
+        bool full = true;
+        for (row = 0; row < board_size; row++) {
+            if (!board[row][col]) {
+                full = false;
+                break;
+            }
+        }
+        full_cols[col] = full;
+    }
+
+    for (row = 0; row < board_size; row++) {
+        for (col = 0; col < board_size; col++) {
+            if (full_rows[row] || full_cols[col]) {
+                board[row][col] = 0;
+            }
+        }
+    }
+}
+
+static inline int count_tiny_pockets_on_board(
+        const unsigned char board[MAX_BOARD_SIZE][MAX_BOARD_SIZE], int board_size) {
+    int tiny = 0;
+    int row;
+    int col;
+
+    for (row = 0; row < board_size; row++) {
+        for (col = 0; col < board_size; col++) {
+            bool isolated = true;
+            int dr;
+            static const int OFFSETS[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+
+            if (board[row][col]) {
                 continue;
             }
 
-            piece = &BLOCK_PIECES[env->hand_piece[slot]];
-            for (rotation_idx = 0; rotation_idx < piece->rotation_count; rotation_idx++) {
-                PieceRotation* rotation = &piece->rotations[rotation_idx];
-                int row;
-                int col;
+            for (dr = 0; dr < 4; dr++) {
+                const int nr = row + OFFSETS[dr][0];
+                const int nc = col + OFFSETS[dr][1];
+                if (nr < 0 || nr >= board_size || nc < 0 || nc >= board_size) {
+                    continue;
+                }
+                if (!board[nr][nc]) {
+                    isolated = false;
+                    break;
+                }
+            }
 
-                if (!env->allow_rotations && rotation_idx != 0) {
+            if (isolated) {
+                tiny += 1;
+            }
+        }
+    }
+
+    return tiny;
+}
+
+static int collect_slot_placements(
+        const BlockPuzzle* env,
+        const unsigned char board[MAX_BOARD_SIZE][MAX_BOARD_SIZE],
+        const unsigned char hand_piece[HAND_SIZE],
+        const unsigned char hand_active[HAND_SIZE],
+        int slot,
+        PlacementCandidate out[MAX_SLOT_PLACEMENTS]) {
+    PieceDef* piece;
+    int rotation_idx;
+    int count = 0;
+
+    if (slot < 0 || slot >= HAND_SIZE || !hand_active[slot]) {
+        return 0;
+    }
+
+    piece = &BLOCK_PIECES[hand_piece[slot]];
+    for (rotation_idx = 0; rotation_idx < piece->rotation_count; rotation_idx++) {
+        PieceRotation* rotation = &piece->rotations[rotation_idx];
+        int row;
+        int col;
+
+        if (!env->allow_rotations && rotation_idx != 0) {
+            continue;
+        }
+
+        for (row = 0; row + rotation->height <= env->board_size; row++) {
+            for (col = 0; col + rotation->width <= env->board_size; col++) {
+                if (!can_place_rotation_on_board(board, env->board_size, rotation, row, col)) {
                     continue;
                 }
 
-                for (row = 0; row + rotation->height <= env->board_size; row++) {
-                    for (col = 0; col + rotation->width <= env->board_size; col++) {
-                        if (!can_place_rotation((BlockPuzzle*)env, rotation, row, col)) {
-                            continue;
-                        }
-
-                        out->legal_now += 1;
-                        out->legal_by_piece[slot] += 1;
-                        if (write_mask) {
-                            out->mask[action_index_for(slot, row, col, rotation_idx)] = 1;
-                        }
-                    }
+                if (out != NULL) {
+                    out[count].row = (unsigned char)row;
+                    out[count].col = (unsigned char)col;
+                    out[count].rotation_idx = (unsigned char)rotation_idx;
                 }
+                count++;
             }
         }
-        return;
     }
 
-    for (piece_idx = 0; piece_idx < piece_count; piece_idx++) {
-        PieceDef* piece = &BLOCK_PIECES[piece_idx];
+    return count;
+}
+
+static bool hand_finishable_recursive(
+        const BlockPuzzle* env,
+        const unsigned char board[MAX_BOARD_SIZE][MAX_BOARD_SIZE],
+        const unsigned char hand_piece[HAND_SIZE],
+        const unsigned char hand_active[HAND_SIZE]) {
+    int best_slot = -1;
+    int best_count = 0;
+    int active_count = 0;
+    int slot;
+    PlacementCandidate placements[MAX_SLOT_PLACEMENTS];
+
+    for (slot = 0; slot < HAND_SIZE; slot++) {
+        int count;
+
+        if (!hand_active[slot]) {
+            continue;
+        }
+
+        active_count++;
+        count = collect_slot_placements(env, board, hand_piece, hand_active, slot, NULL);
+        if (count == 0) {
+            return false;
+        }
+        if (best_slot < 0 || count < best_count) {
+            best_slot = slot;
+            best_count = count;
+        }
+    }
+
+    if (active_count == 0) {
+        return true;
+    }
+
+    if (best_slot < 0) {
+        return false;
+    }
+
+    best_count = collect_slot_placements(env, board, hand_piece, hand_active, best_slot, placements);
+    for (slot = 0; slot < best_count; slot++) {
+        unsigned char next_board[MAX_BOARD_SIZE][MAX_BOARD_SIZE];
+        unsigned char next_hand_active[HAND_SIZE];
+        PieceRotation* rotation = &BLOCK_PIECES[hand_piece[best_slot]].rotations[placements[slot].rotation_idx];
+
+        copy_board_state(next_board, board, env->board_size);
+        memcpy(next_hand_active, hand_active, sizeof(next_hand_active));
+        place_rotation_on_board(next_board, rotation, placements[slot].row, placements[slot].col);
+        clear_completed_lines_on_board(next_board, env->board_size);
+        next_hand_active[best_slot] = 0;
+
+        if (hand_finishable_recursive(env, next_board, hand_piece, next_hand_active)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static inline int compute_hand_finishable(const BlockPuzzle* env) {
+    unsigned char board_copy[MAX_BOARD_SIZE][MAX_BOARD_SIZE];
+    copy_board_state(board_copy, env->board, env->board_size);
+    return hand_finishable_recursive(env, board_copy, env->hand_piece, env->hand_active) ? 1 : 0;
+}
+
+static inline void scan_moves(const BlockPuzzle* env, MoveStats* out, bool write_mask) {
+    int slot;
+
+    memset(out, 0, sizeof(MoveStats));
+    out->min_legal_visible = 0;
+
+    for (slot = 0; slot < HAND_SIZE; slot++) {
+        PieceDef* piece;
         int rotation_idx;
 
+        if (!env->hand_active[slot]) {
+            continue;
+        }
+
+        piece = &BLOCK_PIECES[env->hand_piece[slot]];
         for (rotation_idx = 0; rotation_idx < piece->rotation_count; rotation_idx++) {
             PieceRotation* rotation = &piece->rotations[rotation_idx];
             int row;
@@ -438,57 +652,44 @@ static inline void scan_moves(const BlockPuzzle* env, MoveStats* out, bool write
 
             for (row = 0; row + rotation->height <= env->board_size; row++) {
                 for (col = 0; col + rotation->width <= env->board_size; col++) {
-                    int slot;
                     if (!can_place_rotation((BlockPuzzle*)env, rotation, row, col)) {
                         continue;
                     }
 
-                    out->future_flex += 1;
-                    for (slot = 0; slot < HAND_SIZE; slot++) {
-                        if (!env->hand_active[slot] || env->hand_piece[slot] != piece_idx) {
-                            continue;
-                        }
-
-                        out->legal_now += 1;
-                        out->legal_by_piece[slot] += 1;
-                        if (write_mask) {
-                            out->mask[action_index_for(slot, row, col, rotation_idx)] = 1;
-                        }
+                    out->legal_now += 1;
+                    out->legal_by_piece[slot] += 1;
+                    if (write_mask) {
+                        out->mask[action_index_for(slot, row, col, rotation_idx)] = 1;
                     }
                 }
             }
         }
     }
-}
 
-static inline bool should_compute_future_flex(const BlockPuzzle* env, bool force_refresh) {
-    if (env->future_flex_reward_scale <= 0.0f) {
-        return false;
+    for (slot = 0; slot < HAND_SIZE; slot++) {
+        if (!env->hand_active[slot]) {
+            continue;
+        }
+
+        if (out->min_legal_visible == 0 || out->legal_by_piece[slot] < out->min_legal_visible) {
+            out->min_legal_visible = out->legal_by_piece[slot];
+        }
+        if (out->legal_by_piece[slot] == 0) {
+            out->dead_visible_pieces += 1;
+        }
     }
 
-    if (force_refresh) {
-        return true;
-    }
-
-    if (env->future_flex_update_interval <= 1) {
-        return true;
-    }
-
-    return env->future_flex_steps_since_update + 1 >= env->future_flex_update_interval;
+    out->hand_finishable = compute_hand_finishable(env);
 }
 
-static inline bool is_future_flex_danger(const BlockPuzzle* env, int legal_count, int fill_count) {
-    const float fill_ratio = (float)fill_count / (float)(env->board_size * env->board_size);
-    return fill_ratio >= env->future_flex_danger_fill_threshold
-        || legal_count <= env->future_flex_danger_legal_threshold;
-}
-
-static float compute_state_potential(BlockPuzzle* env, int legal_count, float future_flex) {
+static float compute_state_potential(BlockPuzzle* env) {
     const float fill_ratio = (float)board_fill(env) / (float)(env->board_size * env->board_size);
     const float fill_over = fmaxf(0.0f, fill_ratio - env->fill_penalty_threshold);
-    return env->legal_reward_scale * log1pf((float)legal_count)
-        + env->future_flex_reward_scale * log1pf(future_flex)
-        - env->fill_penalty_scale * fill_over * fill_over;
+    return env->legal_reward_scale * log1pf((float)(env->current_min_legal_visible + 1))
+        + env->hand_finishable_reward_scale * (float)env->current_hand_finishable
+        - env->dead_visible_piece_penalty_scale * (float)env->current_dead_visible_pieces
+        - env->fill_penalty_scale * fill_over * fill_over
+        - env->tiny_pocket_penalty_scale * (float)env->current_tiny_pockets;
 }
 
 static void write_board_obs(BlockPuzzle* env, unsigned char* board_obs) {
@@ -536,41 +737,26 @@ static void write_scalar_obs(BlockPuzzle* env, unsigned char* scalar_obs) {
     }
 }
 
-static bool update_observations(BlockPuzzle* env, bool force_future_flex_refresh) {
+static bool update_observations(BlockPuzzle* env) {
     unsigned char* board_obs = env->observations;
     unsigned char* preview_obs = board_obs + OBS_BOARD_CELLS;
     unsigned char* scalar_obs = preview_obs + OBS_PREVIEW_CELLS;
     unsigned char* action_mask = scalar_obs + OBS_SCALAR_CELLS;
     MoveStats move_stats;
-    int fill_count;
-    bool future_flex_danger;
-    bool recompute_future_flex;
 
     memset(env->observations, 0, OBS_TOTAL_SIZE);
     write_board_obs(env, board_obs);
     write_preview_obs(env, preview_obs);
     write_scalar_obs(env, scalar_obs);
-    scan_moves(env, &move_stats, true, false);
-    fill_count = board_fill(env);
-    future_flex_danger = is_future_flex_danger(env, move_stats.legal_now, fill_count);
-    recompute_future_flex = future_flex_danger
-        && should_compute_future_flex(env, force_future_flex_refresh);
-    if (recompute_future_flex) {
-        scan_moves(env, &move_stats, true, true);
-    }
+    scan_moves(env, &move_stats, true);
     memcpy(action_mask, move_stats.mask, ACTION_COUNT);
     env->current_legal_actions = move_stats.legal_now;
-    if (recompute_future_flex) {
-        env->current_future_flex = (float)move_stats.future_flex / (float)block_piece_count();
-        env->future_flex_steps_since_update = 0;
-    } else if (!future_flex_danger || env->future_flex_reward_scale <= 0.0f) {
-        env->current_future_flex = 0.0f;
-        env->future_flex_steps_since_update = 0;
-    } else {
-        env->future_flex_steps_since_update += 1;
-    }
-    env->current_potential = compute_state_potential(
-        env, env->current_legal_actions, env->current_future_flex);
+    env->current_dead_visible_pieces = move_stats.dead_visible_pieces;
+    env->current_min_legal_visible = move_stats.min_legal_visible;
+    env->current_sum_legal_visible = move_stats.legal_now;
+    env->current_hand_finishable = move_stats.hand_finishable;
+    env->current_tiny_pockets = count_tiny_pockets_on_board(env->board, env->board_size);
+    env->current_potential = compute_state_potential(env);
     return move_stats.legal_now > 0;
 }
 
@@ -644,6 +830,11 @@ static void write_episode_log(BlockPuzzle* env) {
     env->log.mask_invalid_actions += (float)env->mask_invalid_actions;
     env->log.mask_mismatch_actions += (float)env->mask_mismatch_actions;
     env->log.avg_legal_actions += env->legal_action_sum / (float)max_int(1, env->steps);
+    env->log.dead_visible_pieces += env->dead_visible_piece_sum / (float)max_int(1, env->steps);
+    env->log.min_legal_visible += env->min_legal_visible_sum / (float)max_int(1, env->steps);
+    env->log.sum_legal_visible += env->sum_legal_visible_sum / (float)max_int(1, env->steps);
+    env->log.hand_finishable += env->hand_finishable_sum / (float)max_int(1, env->steps);
+    env->log.tiny_pockets += env->tiny_pocket_sum / (float)max_int(1, env->steps);
     env->log.board_fill += (float)env->board_fill_peak;
     env->log.episode_return += env->episode_return;
     env->log.episode_length += (float)env->steps;
@@ -665,9 +856,17 @@ static void start_episode(BlockPuzzle* env) {
     env->board_fill_peak = 0;
     env->episode_return = 0.0f;
     env->legal_action_sum = 0.0f;
-    env->future_flex_steps_since_update = 0;
-    env->current_future_flex = 0.0f;
-    update_observations(env, true);
+    env->dead_visible_piece_sum = 0.0f;
+    env->min_legal_visible_sum = 0.0f;
+    env->sum_legal_visible_sum = 0.0f;
+    env->hand_finishable_sum = 0.0f;
+    env->tiny_pocket_sum = 0.0f;
+    env->current_dead_visible_pieces = 0;
+    env->current_min_legal_visible = 0;
+    env->current_sum_legal_visible = 0;
+    env->current_hand_finishable = 0;
+    env->current_tiny_pockets = 0;
+    update_observations(env);
 }
 
 static void init_env(BlockPuzzle* env) {
@@ -696,26 +895,23 @@ static void init_env(BlockPuzzle* env) {
     if (env->legal_reward_scale < 0.0f) {
         env->legal_reward_scale = 0.03f;
     }
-    if (env->future_flex_reward_scale < 0.0f) {
-        env->future_flex_reward_scale = 0.05f;
+    if (env->hand_finishable_reward_scale < 0.0f) {
+        env->hand_finishable_reward_scale = 0.10f;
+    }
+    if (env->dead_visible_piece_penalty_scale < 0.0f) {
+        env->dead_visible_piece_penalty_scale = 0.10f;
     }
     if (env->fill_penalty_scale < 0.0f) {
         env->fill_penalty_scale = 2.5f;
     }
     if (env->fill_penalty_threshold <= 0.0f || env->fill_penalty_threshold >= 1.0f) {
-        env->fill_penalty_threshold = 0.60f;
-    }
-    if (env->future_flex_danger_fill_threshold <= 0.0f || env->future_flex_danger_fill_threshold >= 1.0f) {
-        env->future_flex_danger_fill_threshold = 0.60f;
+        env->fill_penalty_threshold = 0.58f;
     }
     if (env->max_episode_steps <= 0) {
         env->max_episode_steps = 500;
     }
-    if (env->future_flex_update_interval <= 0) {
-        env->future_flex_update_interval = 1;
-    }
-    if (env->future_flex_danger_legal_threshold <= 0) {
-        env->future_flex_danger_legal_threshold = 96;
+    if (env->tiny_pocket_penalty_scale < 0.0f) {
+        env->tiny_pocket_penalty_scale = 0.10f;
     }
 }
 
@@ -758,6 +954,11 @@ static void c_step(BlockPuzzle* env) {
     env->terminals[0] = 0.0f;
     env->steps++;
     env->legal_action_sum += (float)env->current_legal_actions;
+    env->dead_visible_piece_sum += (float)env->current_dead_visible_pieces;
+    env->min_legal_visible_sum += (float)env->current_min_legal_visible;
+    env->sum_legal_visible_sum += (float)env->current_sum_legal_visible;
+    env->hand_finishable_sum += (float)env->current_hand_finishable;
+    env->tiny_pocket_sum += (float)env->current_tiny_pockets;
 
     if (action >= 0 && action < ACTION_COUNT) {
         mask_says_legal = action_mask[action] != 0;
@@ -767,7 +968,7 @@ static void c_step(BlockPuzzle* env) {
         env->invalid_actions++;
         env->mask_invalid_actions++;
         reward = env->invalid_penalty;
-        update_observations(env, false);
+        update_observations(env);
         if (env->steps >= env->max_episode_steps) {
             timed_out = true;
         }
@@ -796,7 +997,6 @@ static void c_step(BlockPuzzle* env) {
         int cleared_lines = 0;
         int cleared_cells;
         bool any_legal;
-        bool hand_changed = false;
 
         if (!can_place(env, slot, row, col, rotation_idx)) {
             env->invalid_actions++;
@@ -806,7 +1006,7 @@ static void c_step(BlockPuzzle* env) {
                 env->mask_mismatch_actions++;
             }
             reward = env->invalid_penalty;
-            update_observations(env, false);
+            update_observations(env);
             if (env->steps >= env->max_episode_steps) {
                 timed_out = true;
             }
@@ -841,10 +1041,9 @@ static void c_step(BlockPuzzle* env) {
 
         if (!any_active_piece(env)) {
             draw_hand(env);
-            hand_changed = true;
         }
 
-        any_legal = update_observations(env, hand_changed || cleared_lines > 0);
+        any_legal = update_observations(env);
         if (!any_legal) {
             reward += env->loss_penalty;
             reward -= phi_before;
