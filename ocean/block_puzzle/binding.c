@@ -20,8 +20,7 @@ void my_init(Env* env, Dict* kwargs) {
     env->invalid_penalty = (float)dict_get(kwargs, "invalid_penalty")->value;
     env->loss_penalty = (float)dict_get(kwargs, "loss_penalty")->value;
     env->shaping_gamma = (float)dict_get(kwargs, "shaping_gamma")->value;
-    env->legal_reward_scale = (float)dict_get(kwargs, "legal_reward_scale")->value;
-    env->hand_finishable_reward_scale = (float)dict_get(kwargs, "hand_finishable_reward_scale")->value;
+    env->min_legal_reward_scale = (float)dict_get(kwargs, "min_legal_reward_scale")->value;
     env->dead_visible_piece_penalty_scale = (float)dict_get(kwargs, "dead_visible_piece_penalty_scale")->value;
     env->fill_penalty_scale = (float)dict_get(kwargs, "fill_penalty_scale")->value;
     env->fill_penalty_threshold = (float)dict_get(kwargs, "fill_penalty_threshold")->value;
@@ -41,7 +40,6 @@ void my_log(Log* log, Dict* out) {
     dict_set(out, "dead_visible_pieces", log->dead_visible_pieces);
     dict_set(out, "min_legal_visible", log->min_legal_visible);
     dict_set(out, "sum_legal_visible", log->sum_legal_visible);
-    dict_set(out, "hand_finishable", log->hand_finishable);
     dict_set(out, "tiny_pockets", log->tiny_pockets);
     dict_set(out, "board_fill", log->board_fill);
     dict_set(out, "episode_return", log->episode_return);
