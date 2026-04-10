@@ -20,12 +20,13 @@ void my_init(Env* env, Dict* kwargs) {
     env->invalid_penalty = (float)dict_get(kwargs, "invalid_penalty")->value;
     env->loss_penalty = (float)dict_get(kwargs, "loss_penalty")->value;
     env->shaping_gamma = (float)dict_get(kwargs, "shaping_gamma")->value;
-    env->min_legal_reward_scale = (float)dict_get(kwargs, "min_legal_reward_scale")->value;
+    env->min_legal_guardrail_penalty_scale = (float)dict_get(kwargs, "min_legal_guardrail_penalty_scale")->value;
     env->dead_visible_piece_penalty_scale = (float)dict_get(kwargs, "dead_visible_piece_penalty_scale")->value;
     env->fill_penalty_scale = (float)dict_get(kwargs, "fill_penalty_scale")->value;
     env->fill_penalty_threshold = (float)dict_get(kwargs, "fill_penalty_threshold")->value;
     env->tiny_pocket_penalty_scale = (float)dict_get(kwargs, "tiny_pocket_penalty_scale")->value;
     env->max_episode_steps = (int)dict_get(kwargs, "max_episode_steps")->value;
+    env->min_legal_guardrail_threshold = (int)dict_get(kwargs, "min_legal_guardrail_threshold")->value;
     init_env(env);
 }
 

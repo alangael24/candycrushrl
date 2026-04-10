@@ -85,12 +85,13 @@ typedef struct BlockPuzzle {
     float invalid_penalty;
     float loss_penalty;
     float shaping_gamma;
-    float min_legal_reward_scale;
+    float min_legal_guardrail_penalty_scale;
     float dead_visible_piece_penalty_scale;
     float fill_penalty_scale;
     float fill_penalty_threshold;
     float tiny_pocket_penalty_scale;
     int max_episode_steps;
+    int min_legal_guardrail_threshold;
 
     int score;
     int steps;
@@ -478,12 +479,11 @@ static inline void scan_moves(const BlockPuzzle* env, MoveStats* out, bool write
 }
 
 static float compute_state_potential(BlockPuzzle* env) {
-    const float fill_ratio = (float)board_fill(env) / (float)(env->board_size * env->board_size);
-    const float fill_over = fmaxf(0.0f, fill_ratio - env->fill_penalty_threshold);
-    return env->min_legal_reward_scale * log1pf((float)(env->current_min_legal_visible + 1))
-        - env->dead_visible_piece_penalty_scale * (float)env->current_dead_visible_pieces
-        - env->fill_penalty_scale * fill_over * fill_over
-        - env->tiny_pocket_penalty_scale * (float)env->current_tiny_pockets;
+    const float dead_visible_guard = env->current_dead_visible_pieces > 0 ? 1.0f : 0.0f;
+    const float min_legal_shortfall = (float)max_int(
+        0, env->min_legal_guardrail_threshold - env->current_min_legal_visible);
+    return -env->dead_visible_piece_penalty_scale * dead_visible_guard
+        - env->min_legal_guardrail_penalty_scale * min_legal_shortfall;
 }
 
 static void write_board_obs(BlockPuzzle* env, unsigned char* board_obs) {
@@ -682,11 +682,11 @@ static void init_env(BlockPuzzle* env) {
     if (env->shaping_gamma <= 0.0f || env->shaping_gamma > 1.0f) {
         env->shaping_gamma = 0.995f;
     }
-    if (env->min_legal_reward_scale < 0.0f) {
-        env->min_legal_reward_scale = 0.02f;
+    if (env->min_legal_guardrail_penalty_scale < 0.0f) {
+        env->min_legal_guardrail_penalty_scale = 0.01f;
     }
     if (env->dead_visible_piece_penalty_scale < 0.0f) {
-        env->dead_visible_piece_penalty_scale = 0.08f;
+        env->dead_visible_piece_penalty_scale = 0.25f;
     }
     if (env->fill_penalty_scale < 0.0f) {
         env->fill_penalty_scale = 2.5f;
@@ -696,6 +696,9 @@ static void init_env(BlockPuzzle* env) {
     }
     if (env->max_episode_steps <= 0) {
         env->max_episode_steps = 500;
+    }
+    if (env->min_legal_guardrail_threshold <= 0) {
+        env->min_legal_guardrail_threshold = 24;
     }
     if (env->tiny_pocket_penalty_scale < 0.0f) {
         env->tiny_pocket_penalty_scale = 0.08f;
